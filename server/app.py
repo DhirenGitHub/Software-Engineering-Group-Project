@@ -163,9 +163,42 @@ def video_feed(cam_id):
     )
 
 
+@app.route("/heatmap/<cam_id>")
+def heatmap_feed(cam_id):
+    d = _detectors.get(cam_id)
+    if d is None:
+        return jsonify({"error": "camera not registered"}), 404
+
+    return Response(
+        _generate_heatmap(d),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
 def _generate(detector):
     while True:
         frame, _ = detector.get_latest()
+
+        if frame is None:
+            time.sleep(0.02)
+            continue
+
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_Q])
+        if not ok:
+            continue
+
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n"
+            + buf.tobytes()
+            + b"\r\n"
+        )
+        time.sleep(1 / 30)
+
+
+def _generate_heatmap(detector):
+    while True:
+        frame = detector.get_latest_heatmap()
 
         if frame is None:
             time.sleep(0.02)

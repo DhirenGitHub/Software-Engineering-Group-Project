@@ -9,8 +9,30 @@ import Hls from 'hls.js'
 export default function CameraFeed({ camera, detectionOn = true }) {
   const { label, location, overlays = {}, sourceType, sourceUrl, rawUrl, rawSourceType } = camera
 
-  const activeType = detectionOn ? sourceType : (rawSourceType || sourceType)
-  const activeUrl  = detectionOn ? sourceUrl  : (rawUrl || sourceUrl)
+  const [heatmapOn, setHeatmapOn] = useState(false)
+
+  // 1. Create Heatmap URL safely (Swaps "video" or "video_feed" to "heatmap")
+  const heatmapUrl = sourceUrl ? sourceUrl.replace(/video[^/]*\//, 'heatmap/') : null
+
+  // 2. Determine what to display based on the toggles
+  let activeType = sourceType
+  let activeUrl = sourceUrl
+
+  if (!detectionOn) {
+    // AI is OFF -> try to use raw source
+    activeType = rawSourceType || sourceType
+    activeUrl = rawUrl || sourceUrl
+  } else if (heatmapOn && heatmapUrl) {
+    // AI is ON and Heatmap is ON -> use Heatmap stream
+    activeType = sourceType
+    activeUrl = heatmapUrl
+  }
+
+  // 3. Security Guardrail: Prevent local C:/ drives from crashing the browser
+  const isLocalFile = activeType === 'file' && activeUrl && !activeUrl.startsWith('http') && !activeUrl.startsWith('blob:')
+  if (isLocalFile) {
+    activeType = 'blocked_local'
+  }
 
   return (
     <div style={styles.wrapper}>
@@ -56,6 +78,16 @@ export default function CameraFeed({ camera, detectionOn = true }) {
           </div>
         )}
 
+        {/* HEAT Button: Only shows if AI detection is ON and a heatmap URL exists */}
+        {heatmapUrl && detectionOn && (
+          <button
+            onClick={() => setHeatmapOn(v => !v)}
+            style={heatmapOn ? styles.heatmapToggleActive : styles.heatmapToggle}
+          >
+            HEAT
+          </button>
+        )}
+
         {overlays.faceRecognition && (
           <div style={styles.faceBadge}>
             <span style={styles.faceText}>{overlays.faceRecognition}</span>
@@ -76,13 +108,14 @@ export default function CameraFeed({ camera, detectionOn = true }) {
 
 function FeedVideo({ sourceType, sourceUrl }) {
   switch (sourceType) {
-    case 'mjpeg_http':  return <MjpegFeed   url={sourceUrl} />
-    case 'file':        return <VideoFileFeed url={sourceUrl} />
-    case 'device':      return <DeviceFeed   deviceId={sourceUrl} />
-    case 'hls':         return <HlsFeed      url={sourceUrl} />
-    case 'rtsp':        return <RtspPlaceholder />
-    case 'webrtc':      return <WebRtcPlaceholder />
-    default:            return <DarkPlaceholder />
+    case 'mjpeg_http':    return <MjpegFeed   url={sourceUrl} />
+    case 'file':          return <VideoFileFeed url={sourceUrl} />
+    case 'blocked_local': return <ErrorState label="Raw local files blocked by browser. Turn AI Detection back on." />
+    case 'device':        return <DeviceFeed   deviceId={sourceUrl} />
+    case 'hls':           return <HlsFeed      url={sourceUrl} />
+    case 'rtsp':          return <RtspPlaceholder />
+    case 'webrtc':        return <WebRtcPlaceholder />
+    default:              return <DarkPlaceholder />
   }
 }
 
@@ -341,4 +374,16 @@ const styles = {
   faceText: { fontSize: '9px', fontWeight: 700, color: '#38b45a', letterSpacing: '0.06em' },
   personId: { position: 'absolute', top: '35%', right: '15%', backgroundColor: 'rgba(0,0,0,0.75)', border: '1px solid #2a2a2a', borderRadius: '2px', padding: '2px 5px', zIndex: 10 },
   personIdText: { fontSize: '8px', color: '#6e706e', letterSpacing: '0.04em' },
+  heatmapToggle: {
+    position: 'absolute', bottom: 10, right: 12, zIndex: 10,
+    backgroundColor: 'rgba(0,0,0,0.75)', border: '1px solid #2a2a2a',
+    borderRadius: '3px', padding: '4px 8px', cursor: 'pointer',
+    fontSize: '9px', fontWeight: 700, color: '#636463', letterSpacing: '0.08em',
+  },
+  heatmapToggleActive: {
+    position: 'absolute', bottom: 10, right: 12, zIndex: 10,
+    backgroundColor: 'rgba(0,0,0,0.75)', border: '1px solid rgba(213,37,33,0.5)',
+    borderRadius: '3px', padding: '4px 8px', cursor: 'pointer',
+    fontSize: '9px', fontWeight: 700, color: '#d52521', letterSpacing: '0.08em',
+  },
 }

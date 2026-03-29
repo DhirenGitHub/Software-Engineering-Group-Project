@@ -13,6 +13,32 @@ import cv2
 from ultralytics import YOLO
 
 
+# ── Heatmap helper ───────────────────────────────────────────────────────────
+
+_HEAT_INTENSITY = 100
+_HEAT_DECAY     = 0.999
+_HEAT_BLUR      = (51, 51)
+
+
+def _apply_heatmap(frame, accumulator, boxes_xyxy):
+    """Update accumulator with bottom-centre points from boxes, return blended overlay frame."""
+    h, w = frame.shape[:2]
+    for x1, y1, x2, y2 in boxes_xyxy:
+        cx, cy = int((x1 + x2) / 2), int(y2)
+        if 0 <= cx < w and 0 <= cy < h:
+            cv2.circle(accumulator, (cx, cy), radius=15,
+                       color=(_HEAT_INTENSITY), thickness=-1)
+    np.multiply(accumulator, _HEAT_DECAY, out=accumulator)
+    blurred  = cv2.GaussianBlur(np.clip(accumulator, 0, 255), _HEAT_BLUR, 0)
+    colormap = cv2.applyColorMap(blurred.astype(np.uint8), cv2.COLORMAP_JET)
+    mask     = blurred > 15
+    mask_3ch = np.stack([mask] * 3, axis=2)
+    blended  = cv2.addWeighted(frame, 0.6, colormap, 0.4, 0)
+    out      = frame.copy()
+    np.putmask(out, mask_3ch, blended)
+    return out
+
+
 class OptimisedDetector:
     """
     Two background threads:
@@ -43,6 +69,9 @@ class OptimisedDetector:
         self._lock              = threading.Lock()
         self._running           = False
 
+        self._heat_accumulator: np.ndarray | None          = None
+        self._heatmap_frame:    cv2.typing.MatLike | None  = None
+
         # For webcam / device sources, cv2 expects an int index
         self._cv2_source = int(source) if str(source).isdigit() else source
 
@@ -61,6 +90,11 @@ class OptimisedDetector:
         """Returns (annotated_frame_bgr, person_count) or (None, 0)."""
         with self._lock:
             return self._annotated_frame, self._count
+
+    def get_latest_heatmap(self):
+        """Returns heatmap_frame_bgr or None if not yet available."""
+        with self._lock:
+            return self._heatmap_frame
 
     # ── background threads ──────────────────────────────────────────────────
 
@@ -110,9 +144,16 @@ class OptimisedDetector:
             annotated = results[0].plot()
             count = len(results[0].boxes)
 
+            h, w = frame.shape[:2]
+            if self._heat_accumulator is None:
+                self._heat_accumulator = np.zeros((h, w), dtype=np.float32)
+            boxes = results[0].boxes.xyxy.cpu().numpy() if count else np.empty((0, 4))
+            heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
+
             with self._lock:
                 self._annotated_frame = annotated
-                self._count = count
+                self._count           = count
+                self._heatmap_frame   = heatmap_frm
 
 
 class PushDetector:
@@ -143,6 +184,9 @@ class PushDetector:
         self._running          = False
         self._frame_id         = 0   # incremented each push so inference skips dupes
 
+        self._heat_accumulator: np.ndarray | None = None
+        self._heatmap_frame:    np.ndarray | None = None
+
     # ── public API ──────────────────────────────────────────────────────────
 
     def push_frame(self, jpeg_bytes: bytes):
@@ -166,6 +210,11 @@ class PushDetector:
         """Returns (annotated_frame_bgr, person_count) or (None, 0)."""
         with self._lock:
             return self._annotated_frame, self._count
+
+    def get_latest_heatmap(self):
+        """Returns heatmap_frame_bgr or None if not yet available."""
+        with self._lock:
+            return self._heatmap_frame
 
     # ── inference thread ─────────────────────────────────────────────────────
 
@@ -195,6 +244,13 @@ class PushDetector:
             annotated = results[0].plot()
             count     = len(results[0].boxes)
 
+            h, w = frame.shape[:2]
+            if self._heat_accumulator is None:
+                self._heat_accumulator = np.zeros((h, w), dtype=np.float32)
+            boxes = results[0].boxes.xyxy.cpu().numpy() if count else np.empty((0, 4))
+            heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
+
             with self._lock:
                 self._annotated_frame = annotated
                 self._count           = count
+                self._heatmap_frame   = heatmap_frm
