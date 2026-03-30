@@ -6,10 +6,13 @@ PushDetector — same inference loop but receives frames via HTTP POST
 (used for phone cameras that push frames from the browser).
 """
 
+import os
+import queue as _queue
 import threading
 import time
 import numpy as np
 import cv2
+from pathlib import Path
 from ultralytics import YOLO
 
 
@@ -37,6 +40,128 @@ def _apply_heatmap(frame, accumulator, boxes_xyxy):
     out      = frame.copy()
     np.putmask(out, mask_3ch, blended)
     return out
+
+
+# ── CLIP / ChromaDB live indexer ─────────────────────────────────────────────
+
+_CLIP_MODEL_ID  = "openai/clip-vit-base-patch32"
+_CROPS_DIR      = str(Path(__file__).parent / "crops")
+_DB_DIR         = str(Path(__file__).parent / "chroma_db")
+_INDEX_INTERVAL = 2.0   # seconds between indexed frames per detector
+
+_clip_model      = None
+_clip_processor  = None
+_clip_device     = None
+_chroma_col      = None
+_index_queue:    _queue.Queue | None = None
+_clip_ready      = False
+_clip_init_lock  = threading.Lock()
+
+_index_id_count  = 0
+_index_id_lock   = threading.Lock()
+
+
+def _init_clip_indexer():
+    """Lazily load CLIP + ChromaDB on first detector start. Thread-safe."""
+    global _clip_model, _clip_processor, _clip_device, _chroma_col
+    global _index_queue, _clip_ready
+
+    with _clip_init_lock:
+        if _clip_ready:
+            return
+        try:
+            import torch
+            import chromadb
+            from PIL import Image                 # noqa: F401 — tested here
+            from transformers import CLIPProcessor, CLIPModel
+
+            os.makedirs(_CROPS_DIR, exist_ok=True)
+            _clip_device    = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"[indexer] Loading CLIP on {_clip_device} …")
+            _clip_model     = CLIPModel.from_pretrained(_CLIP_MODEL_ID).to(_clip_device)
+            _clip_processor = CLIPProcessor.from_pretrained(_CLIP_MODEL_ID)
+
+            client      = chromadb.PersistentClient(path=_DB_DIR)
+            _chroma_col = client.get_or_create_collection(name="video_people_search")
+
+            _index_queue = _queue.Queue(maxsize=50)
+            threading.Thread(target=_clip_worker, daemon=True).start()
+
+            _clip_ready = True
+            print("[indexer] CLIP + ChromaDB ready — live search enabled")
+        except Exception as exc:
+            print(f"[indexer] CLIP unavailable — search disabled ({exc})")
+
+
+def _clip_worker():
+    """Background thread: dequeues person crops and stores CLIP embeddings."""
+    global _index_id_count
+    import torch
+    from PIL import Image
+
+    while True:
+        item = _index_queue.get()
+        if item is None:
+            break
+        crop_bgr, timestamp, cam_id = item
+        try:
+            pil_img = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+            inputs  = _clip_processor(images=pil_img, return_tensors="pt").to(_clip_device)
+            with torch.no_grad():
+                feats = _clip_model.get_image_features(**inputs)
+
+
+            if not isinstance(feats, torch.Tensor):
+                feats = getattr(feats, 'pooler_output', feats[0])
+
+            vector = feats.cpu().numpy().flatten().tolist()
+
+            with _index_id_lock:
+                _index_id_count += 1
+                idx = _index_id_count
+            crop_file = f"crop_{idx}_t{timestamp:.1f}.jpg"
+            cv2.imwrite(os.path.join(_CROPS_DIR, crop_file), crop_bgr)
+
+            _chroma_col.add(
+                embeddings=[vector],
+                metadatas=[{"timestamp": timestamp, "cam_id": cam_id,
+                            "image_file": crop_file}],
+                ids=[f"id_{idx}"],
+            )
+        except Exception as exc:
+            print(f"[indexer] worker error: {exc}")
+
+
+def search_clips(query_text: str, n_results: int = 5) -> list:
+    """Convert text to CLIP embedding, query ChromaDB, return ranked results."""
+    if not _clip_ready:
+        return []
+    try:
+        import torch
+        inputs = _clip_processor(text=[query_text], return_tensors="pt",
+                                 padding=True).to(_clip_device)
+        with torch.no_grad():
+            feats = _clip_model.get_text_features(**inputs)
+
+
+        if not isinstance(feats, torch.Tensor):
+            feats = getattr(feats, 'pooler_output', feats[0])
+
+        vector = feats.cpu().numpy().flatten().tolist()
+
+        raw = _chroma_col.query(query_embeddings=[vector], n_results=n_results)
+        out = []
+        for i, meta in enumerate(raw["metadatas"][0]):
+            out.append({
+                "timestamp":  meta["timestamp"],
+                "cam_id":     meta.get("cam_id", ""),
+                "image_file": meta["image_file"],
+                "score":      round(raw["distances"][0][i], 4),
+            })
+        return out
+    except Exception as exc:
+        print(f"[indexer] search error: {exc}")
+        return []
 
 
 class OptimisedDetector:
@@ -71,6 +196,7 @@ class OptimisedDetector:
 
         self._heat_accumulator: np.ndarray | None          = None
         self._heatmap_frame:    cv2.typing.MatLike | None  = None
+        self._last_index_time:  float                      = 0.0
 
         # For webcam / device sources, cv2 expects an int index
         self._cv2_source = int(source) if str(source).isdigit() else source
@@ -81,6 +207,7 @@ class OptimisedDetector:
         self._running = True
         threading.Thread(target=self._capture_loop,   daemon=True).start()
         threading.Thread(target=self._inference_loop, daemon=True).start()
+        threading.Thread(target=_init_clip_indexer,   daemon=True).start()
         print(f"[detector] Started — source: {self.source}")
 
     def stop(self):
@@ -155,6 +282,19 @@ class OptimisedDetector:
                 self._count           = count
                 self._heatmap_frame   = heatmap_frm
 
+            # queue person crops for CLIP indexing (rate-limited, never blocks inference)
+            now = time.time()
+            if _clip_ready and count and (now - self._last_index_time) >= _INDEX_INTERVAL:
+                self._last_index_time = now
+                for x1, y1, x2, y2 in boxes:
+                    crop = frame[int(y1):int(y2), int(x1):int(x2)]
+                    if crop.shape[0] >= 50 and crop.shape[1] >= 50:
+                        try:
+                            _index_queue.put_nowait(
+                                (crop.copy(), now, str(self.source)))
+                        except _queue.Full:
+                            pass  # drop silently — never block inference
+
 
 class PushDetector:
     """
@@ -186,6 +326,7 @@ class PushDetector:
 
         self._heat_accumulator: np.ndarray | None = None
         self._heatmap_frame:    np.ndarray | None = None
+        self._last_index_time:  float             = 0.0
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -201,6 +342,7 @@ class PushDetector:
     def start(self):
         self._running = True
         threading.Thread(target=self._inference_loop, daemon=True).start()
+        threading.Thread(target=_init_clip_indexer,   daemon=True).start()
         print("[push-detector] Started — waiting for frames from phone")
 
     def stop(self):
@@ -254,3 +396,16 @@ class PushDetector:
                 self._annotated_frame = annotated
                 self._count           = count
                 self._heatmap_frame   = heatmap_frm
+
+            # queue person crops for CLIP indexing (rate-limited, never blocks inference)
+            now = time.time()
+            if _clip_ready and count and (now - self._last_index_time) >= _INDEX_INTERVAL:
+                self._last_index_time = now
+                for x1, y1, x2, y2 in boxes:
+                    crop = frame[int(y1):int(y2), int(x1):int(x2)]
+                    if crop.shape[0] >= 50 and crop.shape[1] >= 50:
+                        try:
+                            _index_queue.put_nowait(
+                                (crop.copy(), now, str(self.source)))
+                        except _queue.Full:
+                            pass  # drop silently — never block inference

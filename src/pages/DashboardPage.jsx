@@ -5,6 +5,7 @@ import CameraGrid from '../components/dashboard/CameraGrid'
 import AlertsPanel from '../components/dashboard/AlertsPanel'
 import ZoneAnalytics from '../components/dashboard/ZoneAnalytics'
 import FootfallChart from '../components/dashboard/FootfallChart'
+import SearchPanel from '../components/dashboard/SearchPanel'
 import AddCameraModal from '../components/settings/AddCameraModal'
 import { useCameras } from '../context/CameraContext'
 import { alerts, zoneAnalytics, footfallData } from '../data/mockData'
@@ -26,6 +27,7 @@ export default function DashboardPage() {
         <aside style={styles.sidebar}>
           <AlertsPanel alerts={alerts} />
           <ZoneAnalytics data={zoneAnalytics} />
+          <SearchPanel />
           <FootfallChart data={footfallData} />
           <FeedControls detectionOn={detectionOn} onToggle={() => setDetectionOn((v) => !v)} />
           <button style={styles.settingsBtn} onClick={() => navigate('/settings')}>

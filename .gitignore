@@ -30,3 +30,8 @@ Thumbs.db
 # Editor
 .vscode/
 *.log
+
+# Smart Search AI files
+server/crops/
+server/chroma_db/
+__pycache__/

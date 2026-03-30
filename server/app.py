@@ -43,12 +43,13 @@ import uuid
 from pathlib import Path
 
 import cv2
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_from_directory
 
-from detector import OptimisedDetector, PushDetector
+from detector import OptimisedDetector, PushDetector, search_clips
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MODEL_PATH = str(Path(__file__).parent.parent / "assets" / "YOLO.onnx")
+CROPS_DIR  = str(Path(__file__).parent / "crops")
 HOST       = "0.0.0.0"
 PORT       = 5000
 JPEG_Q     = 75
@@ -215,6 +216,27 @@ def _generate_heatmap(detector):
             + b"\r\n"
         )
         time.sleep(1 / 30)
+
+
+# ── Smart Search (CLIP + ChromaDB) ───────────────────────────────────────────
+
+@app.route("/search", methods=["POST"])
+def search_route():
+    body  = request.get_json(force=True)
+    query = body.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "query required"}), 400
+
+    results = search_clips(query, n_results=5)
+    ip = _local_ip()
+    for r in results:
+        r["image_url"] = f"http://{ip}:{PORT}/crops/{r['image_file']}"
+    return jsonify(results)
+
+
+@app.route("/crops/<path:filename>")
+def serve_crop(filename):
+    return send_from_directory(CROPS_DIR, filename)
 
 
 # ── Phone capture page ────────────────────────────────────────────────────────
