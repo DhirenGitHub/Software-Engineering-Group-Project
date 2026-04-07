@@ -10,6 +10,7 @@ const SOURCE_TYPES = [
   { value: 'hls',        label: 'HLS',          description: 'HLS .m3u8 adaptive stream' },
   { value: 'webrtc',     label: 'WebRTC',       description: 'Ultra low-latency WebRTC feed' },
   { value: 'file',       label: 'Video File',   description: 'Local video file (loops — good for testing)' },
+  { value: 'ai_backend', label: 'AI Backend Video', description: 'Local C:\\ path or online URL (Auto-starts Python AI)' },
   { value: 'device',     label: 'Webcam',       description: 'Browser webcam via MediaDevices API' },
 ]
 
@@ -19,6 +20,7 @@ const URL_PLACEHOLDERS = {
   hls:        'http://192.168.1.101/stream/index.m3u8',
   webrtc:     'wss://your-signaling-server/room/cam01',
   file:       'http://localhost:5173/sample.mp4',
+  ai_backend: 'C:\\Users\\...\\Video.mp4 or http://.../vid.mp4',
   device:     '',
 }
 
@@ -28,6 +30,7 @@ const URL_HINTS = {
   hls:        'HLS streams are played via hls.js. Ensure CORS headers are set on the server.',
   webrtc:     'Provide the WebRTC signaling server URL.',
   file:       'Serve the file from a local HTTP server or use a public URL. The video will loop.',
+  ai_backend: 'Enter a local C:\\ path or online .mp4 link. React will automatically tell the Python AI server to process it!',
   device:     'The browser will prompt for camera permission. Leave URL blank to use the default webcam, or enter a deviceId.',
 }
 
@@ -36,6 +39,7 @@ const EMPTY_FORM = {
   location: '',
   sourceType: 'mjpeg_http',
   sourceUrl: '',
+  targetModel: 'person',
   features: [],   // populated later from the monitoring view
 }
 
@@ -50,12 +54,21 @@ const EMPTY_FORM = {
 export default function AddCameraModal({ open, onClose, onSave, initial = null }) {
   const [form, setForm] = useState(EMPTY_FORM)
   const [testState, setTestState] = useState('idle') // 'idle' | 'testing' | 'ok' | 'fail'
+  const [isSaving, setIsSaving] = useState(false)
   const overlayRef = useRef(null)
 
   // Reset / populate form when modal opens
   useEffect(() => {
     if (open) {
-      setForm(initial ?? EMPTY_FORM)
+      if (initial) {
+        setForm({
+          ...initial,
+          sourceType: initial.rawSourceType || initial.sourceType,
+          sourceUrl: initial.rawUrl !== undefined ? initial.rawUrl : initial.sourceUrl,
+        })
+      } else {
+        setForm(EMPTY_FORM)
+      }
       setTestState('idle')
     }
   }, [open, initial])
@@ -72,9 +85,48 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
 
   const set = (field, value) => setForm((f) => ({ ...f, [field]: value }))
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!form.name.trim()) return
-    onSave({ ...form, name: form.name.trim(), location: form.location.trim() })
+    setIsSaving(true)
+    let finalForm = { ...form, name: form.name.trim(), location: form.location.trim() }
+
+    if (finalForm.sourceType === 'ai_backend' || finalForm.sourceType === 'device') {
+      try {
+        // If editing, attempt to delete old backend stream first to free up the webcam
+        if (initial && initial.backendId) {
+          try {
+            await fetch(`http://localhost:5000/cameras/${initial.backendId}`, { method: 'DELETE' })
+          } catch (e) { /* ignore fail */ }
+        }
+        const camId = `CAM_${finalForm.name.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}_${Math.floor(Math.random()*1000)}`
+        let backendSource = finalForm.sourceUrl;
+        if (finalForm.sourceType === 'device' && !backendSource.trim()) {
+            backendSource = "0";
+        }
+
+        const res = await fetch("http://localhost:5000/cameras", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: camId, source: backendSource, model: finalForm.targetModel })
+        })
+        if (res.ok) {
+          const data = await res.json()
+          finalForm.sourceType = 'mjpeg_http'
+          finalForm.sourceUrl = data.stream
+          finalForm.rawSourceType = form.sourceType
+          finalForm.rawUrl = form.sourceUrl
+          finalForm.backendId = camId
+        } else {
+          alert("Failed to register with AI backend. Is the Python server running?")
+        }
+      } catch (err) {
+        console.error(err)
+        alert("Error connecting to AI backend. Ensure 'python server/app.py' is running.")
+      }
+    }
+
+    onSave(finalForm)
+    setIsSaving(false)
     onClose()
   }
 
@@ -82,7 +134,11 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
     setTestState('testing')
     // Simulate a connection test (real integration would ping the URL)
     await new Promise((r) => setTimeout(r, 1200))
-    setTestState(form.sourceUrl ? 'ok' : 'fail')
+    if (form.sourceType === 'device') {
+      setTestState('ok')
+    } else {
+      setTestState(form.sourceUrl ? 'ok' : 'fail')
+    }
   }
 
   const isEdit = !!initial
@@ -155,6 +211,20 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
             </div>
           </Field>
 
+          <Field label="Detection Model">
+            <div style={styles.selectWrapper}>
+              <select
+                style={styles.select}
+                value={form.targetModel || 'person'}
+                onChange={(e) => set('targetModel', e.target.value)}
+              >
+                <option value="person">Person Detection (Default)</option>
+                <option value="phone">Phone Detection</option>
+                <option value="both">Person & Phone Detection (Combined)</option>
+              </select>
+            </div>
+          </Field>
+
           {form.sourceType !== 'device' && (
             <Field label="Stream URL">
               <input
@@ -199,9 +269,10 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
             variant="primary"
             size="sm"
             onClick={handleSave}
-            style={{ opacity: form.name.trim() ? 1 : 0.4 }}
+            style={{ opacity: form.name.trim() && !isSaving ? 1 : 0.4 }}
+            disabled={isSaving}
           >
-            Save
+            {isSaving ? 'Processing...' : 'Save'}
           </Button>
         </div>
       </div>

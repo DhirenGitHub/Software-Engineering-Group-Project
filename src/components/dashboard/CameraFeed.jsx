@@ -108,14 +108,14 @@ export default function CameraFeed({ camera, detectionOn = true }) {
 
 function FeedVideo({ sourceType, sourceUrl }) {
   switch (sourceType) {
-    case 'mjpeg_http':    return <MjpegFeed   url={sourceUrl} />
-    case 'file':          return <VideoFileFeed url={sourceUrl} />
+    case 'mjpeg_http': return <MjpegFeed url={sourceUrl} />
+    case 'file': return <VideoFileFeed url={sourceUrl} />
     case 'blocked_local': return <ErrorState label="Raw local files blocked by browser. Turn AI Detection back on." />
-    case 'device':        return <DeviceFeed   deviceId={sourceUrl} />
-    case 'hls':           return <HlsFeed      url={sourceUrl} />
-    case 'rtsp':          return <RtspPlaceholder />
-    case 'webrtc':        return <WebRtcPlaceholder />
-    default:              return <DarkPlaceholder />
+    case 'device': return <DeviceFeed deviceId={sourceUrl} />
+    case 'hls': return <HlsFeed url={sourceUrl} />
+    case 'rtsp': return <RtspPlaceholder />
+    case 'webrtc': return <WebRtcPlaceholder />
+    default: return <DarkPlaceholder />
   }
 }
 
@@ -175,7 +175,7 @@ function DeviceFeed({ deviceId }) {
     }
   }, [deviceId])
 
-  if (state === 'denied')  return <ErrorState label="Camera access denied" />
+  if (state === 'denied') return <ErrorState label="Camera access denied" />
   if (state === 'loading') return <LoadingState label="Requesting camera…" />
 
   return (
@@ -192,7 +192,7 @@ function DeviceFeed({ deviceId }) {
 /** HLS stream via hls.js */
 function HlsFeed({ url }) {
   const videoRef = useRef(null)
-  const hlsRef   = useRef(null)
+  const hlsRef = useRef(null)
   const [error, setError] = useState(false)
 
   useEffect(() => {
@@ -217,8 +217,8 @@ function HlsFeed({ url }) {
     return () => { hlsRef.current?.destroy() }
   }, [url])
 
-  if (!url)   return <DarkPlaceholder />
-  if (error)  return <ErrorState label="HLS stream failed" />
+  if (!url) return <DarkPlaceholder />
+  if (error) return <ErrorState label="HLS stream failed" />
 
   return (
     <video
@@ -293,10 +293,11 @@ const styles = {
     flex: 1,
     minWidth: 0,
     minHeight: 0,
-    overflow: 'hidden',
+    overflow: 'auto',
     border: '1px solid #141414',
     backgroundColor: '#050505',
     position: 'relative',
+    resize: 'both',        // users can drag the corner to resize freely
   },
   feedBg: {
     width: '100%',
@@ -307,7 +308,7 @@ const styles = {
   feedMedia: {
     width: '100%',
     height: '100%',
-    objectFit: 'cover',
+    objectFit: 'fill',
     display: 'block',
     backgroundColor: '#0b0b0c',
   },

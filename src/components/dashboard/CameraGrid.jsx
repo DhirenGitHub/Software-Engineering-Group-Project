@@ -53,6 +53,7 @@ const styles = {
     height: '100%',
     gap: '2px',
     backgroundColor: '#060606',
+    gridAutoRows: '1fr',
   },
   empty: {
     width: '100%',

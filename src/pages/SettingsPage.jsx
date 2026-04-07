@@ -10,16 +10,6 @@ import { settingsNavItems } from '../data/mockData'
 
 const DETECTION_SERVER = 'http://localhost:5000'
 
-async function registerWithDetectionServer(id, sourceUrl) {
-  const res = await fetch(`${DETECTION_SERVER}/cameras`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, source: sourceUrl }),
-  })
-  if (!res.ok) throw new Error(`server ${res.status}`)
-  return await res.json() // { id, stream, capture }
-}
-
 export default function SettingsPage() {
   const [activeSection, setActiveSection] = useState('camera-feeds')
   const [modalOpen, setModalOpen] = useState(false)
@@ -32,8 +22,9 @@ export default function SettingsPage() {
 
   const handleRemove = (cam) => {
     removeCamera(cam.id)
-    // Best-effort deregister from detection server
-    fetch(`${DETECTION_SERVER}/cameras/${cam.id}`, { method: 'DELETE' }).catch(() => {})
+    // properly cleanly deregister from detection server so cv2 releases webcams
+    const backendId = cam.backendId || cam.id
+    fetch(`${DETECTION_SERVER}/cameras/${backendId}`, { method: 'DELETE' }).catch(() => {})
   }
 
   const handleSave = async (config) => {
@@ -43,22 +34,8 @@ export default function SettingsPage() {
     }
 
     const id = `CAM${String(cameras.length + 1).padStart(2, '0')}`
-
-    // For URL-based sources, route through detection server for annotated stream
-    if (config.sourceUrl && config.sourceType !== 'device') {
-      try {
-        const data = await registerWithDetectionServer(id, config.sourceUrl)
-        addCamera({
-          ...config, id,
-          sourceUrl: data.stream, sourceType: 'mjpeg_http',
-          rawUrl: config.sourceUrl, rawSourceType: config.sourceType,
-        })
-        return
-      } catch {
-        // Detection server not running — add with raw URL as fallback
-      }
-    }
-
+    
+    // config already contains backendId, stream URLs, etc. from AddCameraModal
     addCamera({ ...config, id })
   }
 

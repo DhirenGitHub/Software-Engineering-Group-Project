@@ -15,6 +15,21 @@ import cv2
 from pathlib import Path
 from ultralytics import YOLO
 
+_global_models = {}
+
+def get_yolo_model(path: str):
+    if path not in _global_models:
+        print(f"[backend] Loading YOLO cache for {path} …")
+        _global_models[path] = YOLO(path)
+    return _global_models[path]
+
+def resize_frame(frame, max_dim=640):
+    h, w = frame.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+    return frame
+
 
 # ── Heatmap helper ───────────────────────────────────────────────────────────
 
@@ -83,6 +98,12 @@ def _init_clip_indexer():
 
             client      = chromadb.PersistentClient(path=_DB_DIR)
             _chroma_col = client.get_or_create_collection(name="video_people_search")
+            
+            global _index_id_count
+            try:
+                _index_id_count = _chroma_col.count()
+            except:
+                _index_id_count = 0
 
             _index_queue = _queue.Queue(maxsize=50)
             threading.Thread(target=_clip_worker, daemon=True).start()
@@ -108,11 +129,10 @@ def _clip_worker():
             pil_img = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
             inputs  = _clip_processor(images=pil_img, return_tensors="pt").to(_clip_device)
             with torch.no_grad():
-                feats = _clip_model.get_image_features(**inputs)
-
+                feats = _clip_model.get_image_features(pixel_values=inputs["pixel_values"])
 
             if not isinstance(feats, torch.Tensor):
-                feats = getattr(feats, 'pooler_output', feats[0])
+                feats = getattr(feats, 'image_embeds', getattr(feats, 'pooler_output', feats[0]))
 
             vector = feats.cpu().numpy().flatten().tolist()
 
@@ -149,7 +169,12 @@ def search_clips(query_text: str, n_results: int = 5) -> list:
 
         vector = feats.cpu().numpy().flatten().tolist()
 
-        raw = _chroma_col.query(query_embeddings=[vector], n_results=n_results)
+        cnt = _chroma_col.count()
+        if cnt == 0:
+            return []
+            
+        actual_n = min(n_results, cnt)
+        raw = _chroma_col.query(query_embeddings=[vector], n_results=actual_n)
         out = []
         for i, meta in enumerate(raw["metadatas"][0]):
             out.append({
@@ -175,18 +200,35 @@ class OptimisedDetector:
 
     def __init__(
         self,
-        model_path: str,
+        model_path,
         source,                # file path, RTSP URL, MJPEG URL, or device index (int)
         conf: float = 0.40,
         iou:  float = 0.45,
         imgsz: int  = 416,
+        classes: list = None,
+        per_model_classes: list = None,
     ):
-        print(f"[detector] Loading ONNX model from {model_path} …")
-        self.model  = YOLO(model_path)
+        print(f"[detector] Initialising models from {model_path} …")
+        if isinstance(model_path, list):
+            self.models = [get_yolo_model(p) for p in model_path]
+            self.model_paths = model_path
+        else:
+            self.models = [get_yolo_model(model_path)]
+            self.model_paths = [model_path]
+            
+        for m in self.models:
+            for k, v in list(m.names.items()):
+                if "phone" in v.lower() or "cell" in v.lower():
+                    m.names[k] = "phone"
         self.source = source
         self.conf   = conf
         self.iou    = iou
-        self.imgsz  = imgsz
+        self.classes = classes
+        self.per_model_classes = per_model_classes
+        
+        # In combined mode we use multiple models, determine max imgsz needed
+        has_coco_phone = any("yolov8n" in p.lower() for p in self.model_paths)
+        self.imgsz  = 640 if has_coco_phone else imgsz
 
         self._latest_frame:     cv2.typing.MatLike | None = None
         self._annotated_frame:  cv2.typing.MatLike | None = None
@@ -197,6 +239,7 @@ class OptimisedDetector:
         self._heat_accumulator: np.ndarray | None          = None
         self._heatmap_frame:    cv2.typing.MatLike | None  = None
         self._last_index_time:  float                      = 0.0
+        self._cap = None  # store capture reference for clean release
 
         # For webcam / device sources, cv2 expects an int index
         self._cv2_source = int(source) if str(source).isdigit() else source
@@ -212,6 +255,13 @@ class OptimisedDetector:
 
     def stop(self):
         self._running = False
+        # Explicitly release webcam so the camera light turns off
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except:
+                pass
+            self._cap = None
 
     def get_latest(self):
         """Returns (annotated_frame_bgr, person_count) or (None, 0)."""
@@ -228,6 +278,7 @@ class OptimisedDetector:
     def _capture_loop(self):
         cap = cv2.VideoCapture(self._cv2_source)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # never queue stale frames
+        self._cap = cap  # store for clean release on stop()
 
         if not cap.isOpened():
             print(f"[detector] ERROR: Cannot open source: {self.source}")
@@ -258,37 +309,65 @@ class OptimisedDetector:
                 time.sleep(0.01)
                 continue
 
-            results = self.model(
-                frame,
-                imgsz=self.imgsz,
-                conf=self.conf,
-                iou=self.iou,
-                verbose=False,
-                half=False,        # half precision is GPU only
-                agnostic_nms=True, # better for overlapping people in crowds
-            )
+            frame = resize_frame(frame, max_dim=640)
 
-            annotated = results[0].plot()
-            count = len(results[0].boxes)
+            annotated = frame.copy()
+            total_count = 0
+            all_boxes = []
+
+            for idx, m in enumerate(self.models):
+                try:
+                    path_str = self.model_paths[idx].lower() if hasattr(self, 'model_paths') else ""
+                    # Lower confidence threshold slightly for the COCO phone model
+                    current_conf = 0.20 if "yolov8n" in path_str else self.conf
+
+                    # Select appropriate class filter
+                    current_classes = self.classes
+                    if self.per_model_classes and idx < len(self.per_model_classes):
+                        current_classes = self.per_model_classes[idx]
+                        
+                    # ONNX export was rigidly sized, so check if model is ONNX to use correct size
+                    current_imgsz = 416 if "onnx" in path_str else self.imgsz
+
+                    results = m(
+                        frame,
+                        imgsz=current_imgsz,
+                        conf=current_conf,
+                        iou=self.iou,
+                        classes=current_classes,
+                        verbose=False,
+                        half=False,        # half precision is GPU only
+                        agnostic_nms=True, # better for overlapping people in crowds
+                    )
+                    annotated = results[0].plot(img=annotated, line_width=2)
+                    count = len(results[0].boxes)
+                    if count:
+                        all_boxes.append(results[0].boxes.xyxy.cpu().numpy())
+                    total_count += count
+                except Exception as e:
+                    print(f"[detector] Error in inference loop for model {idx}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
 
             h, w = frame.shape[:2]
             if self._heat_accumulator is None:
                 self._heat_accumulator = np.zeros((h, w), dtype=np.float32)
-            boxes = results[0].boxes.xyxy.cpu().numpy() if count else np.empty((0, 4))
+            boxes = np.vstack(all_boxes) if all_boxes else np.empty((0, 4))
             heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
 
             with self._lock:
                 self._annotated_frame = annotated
-                self._count           = count
+                self._count           = total_count
                 self._heatmap_frame   = heatmap_frm
 
             # queue person crops for CLIP indexing (rate-limited, never blocks inference)
             now = time.time()
-            if _clip_ready and count and (now - self._last_index_time) >= _INDEX_INTERVAL:
+            if _clip_ready and total_count and (now - self._last_index_time) >= _INDEX_INTERVAL:
                 self._last_index_time = now
                 for x1, y1, x2, y2 in boxes:
                     crop = frame[int(y1):int(y2), int(x1):int(x2)]
-                    if crop.shape[0] >= 50 and crop.shape[1] >= 50:
+                    if crop.shape[0] >= 20 and crop.shape[1] >= 20:
                         try:
                             _index_queue.put_nowait(
                                 (crop.copy(), now, str(self.source)))
@@ -305,17 +384,33 @@ class PushDetector:
 
     def __init__(
         self,
-        model_path: str,
+        model_path,
         conf:  float = 0.40,
         iou:   float = 0.45,
         imgsz: int   = 416,
+        classes: list = None,
+        per_model_classes: list = None,
     ):
-        print(f"[push-detector] Loading ONNX model from {model_path} …")
-        self.model  = YOLO(model_path)
+        print(f"[push-detector] Initialising models from {model_path} …")
+        if isinstance(model_path, list):
+            self.models = [get_yolo_model(p) for p in model_path]
+            self.model_paths = model_path
+        else:
+            self.models = [get_yolo_model(model_path)]
+            self.model_paths = [model_path]
+            
+        for m in self.models:
+            for k, v in list(m.names.items()):
+                if "phone" in v.lower() or "cell" in v.lower():
+                    m.names[k] = "phone"
         self.source = "push"
         self.conf   = conf
         self.iou    = iou
-        self.imgsz  = imgsz
+        self.classes = classes
+        self.per_model_classes = per_model_classes
+        
+        has_coco_phone = any("yolov8n" in p.lower() for p in self.model_paths)
+        self.imgsz  = 640 if has_coco_phone else imgsz
 
         self._latest_frame:    np.ndarray | None = None
         self._annotated_frame: np.ndarray | None = None
@@ -372,38 +467,61 @@ class PushDetector:
                 continue
 
             last_id = frame_id
+            
+            frame = resize_frame(frame, max_dim=640)
 
-            results = self.model(
-                frame,
-                imgsz=self.imgsz,
-                conf=self.conf,
-                iou=self.iou,
-                verbose=False,
-                half=False,
-                agnostic_nms=True,
-            )
+            annotated = frame.copy()
+            total_count = 0
+            all_boxes = []
 
-            annotated = results[0].plot()
-            count     = len(results[0].boxes)
+            for idx, m in enumerate(self.models):
+                try:
+                    path_str = self.model_paths[idx].lower() if hasattr(self, 'model_paths') else ""
+                    current_conf = 0.20 if "yolov8n" in path_str else self.conf
+
+                    current_classes = self.classes
+                    if self.per_model_classes and idx < len(self.per_model_classes):
+                        current_classes = self.per_model_classes[idx]
+                        
+                    current_imgsz = 416 if "onnx" in path_str else self.imgsz
+
+                    results = m(
+                        frame,
+                        imgsz=current_imgsz,
+                        conf=current_conf,
+                        iou=self.iou,
+                        classes=current_classes,
+                        verbose=False,
+                        half=False,
+                        agnostic_nms=True,
+                    )
+                    annotated = results[0].plot(img=annotated, line_width=2)
+                    count = len(results[0].boxes)
+                    if count:
+                        all_boxes.append(results[0].boxes.xyxy.cpu().numpy())
+                    total_count += count
+                except Exception as e:
+                    print(f"[push-detector] Error in inference loop for model {idx}: {e}")
+                    continue
 
             h, w = frame.shape[:2]
             if self._heat_accumulator is None:
                 self._heat_accumulator = np.zeros((h, w), dtype=np.float32)
-            boxes = results[0].boxes.xyxy.cpu().numpy() if count else np.empty((0, 4))
+            boxes = np.vstack(all_boxes) if all_boxes else np.empty((0, 4))
             heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
 
             with self._lock:
                 self._annotated_frame = annotated
-                self._count           = count
+                self._count           = total_count
                 self._heatmap_frame   = heatmap_frm
 
             # queue person crops for CLIP indexing (rate-limited, never blocks inference)
             now = time.time()
-            if _clip_ready and count and (now - self._last_index_time) >= _INDEX_INTERVAL:
+            if _clip_ready and total_count and (now - self._last_index_time) >= _INDEX_INTERVAL:
                 self._last_index_time = now
                 for x1, y1, x2, y2 in boxes:
                     crop = frame[int(y1):int(y2), int(x1):int(x2)]
-                    if crop.shape[0] >= 50 and crop.shape[1] >= 50:
+                    if crop.shape[0] >= 20 and crop.shape[1] >= 20:
                         try:
                             _index_queue.put_nowait(
                                 (crop.copy(), now, str(self.source)))

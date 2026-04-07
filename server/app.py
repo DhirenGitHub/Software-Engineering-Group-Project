@@ -48,7 +48,9 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from detector import OptimisedDetector, PushDetector, search_clips
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODEL_PATH = str(Path(__file__).parent.parent / "assets" / "YOLO.onnx")
+MODEL_PATH       = str(Path(__file__).parent.parent / "assets" / "YOLO.onnx")
+PHONE_MODEL_PATH = str(Path(__file__).parent.parent / "assets" / "phone_best.pt")
+COCO_MODEL_PATH  = str(Path(__file__).parent.parent / "assets" / "yolov8n.pt")
 CROPS_DIR  = str(Path(__file__).parent / "crops")
 HOST       = "0.0.0.0"
 PORT       = 5000
@@ -107,14 +109,48 @@ def add_camera():
     source = body.get("source", "push")
     conf   = float(body.get("conf", 0.40))
     iou    = float(body.get("iou",  0.45))
+    model_type = body.get("model", "person")
 
     if cam_id in _detectors:
         return jsonify({"error": f"{cam_id} already exists"}), 409
 
-    if source == "push":
-        detector = PushDetector(MODEL_PATH, conf=conf, iou=iou)
+    # ── Model / class-filter selection ──────────────────────────────────────
+    #
+    # person : YOLO.onnx (large, accurate person-only model)
+    # phone  : yolov8n.pt (COCO) → class 67 (cell phone)
+    # both   : two models — YOLO.onnx for persons + yolov8n.pt for phones
+    #          each model gets its OWN class filter via per_model_classes
+    #
+    # per_model_classes is a list parallel to active_model_path:
+    #   None  → single filter shared by all models  (backwards compat)
+    #   [...]  → one filter per model
+    # ───────────────────────────────────────────────────────────────────────
+
+    if model_type == "phone":
+        # Use custom phone_best.pt
+        active_model_path = PHONE_MODEL_PATH
+        cls_filter = [0]  # In custom phone model, class 0 is 'Mobile-phone'
+        per_model_classes = None  # single model, single filter
+    elif model_type == "both":
+        # Two models: person model + custom phone model
+        active_model_path = [MODEL_PATH, PHONE_MODEL_PATH]
+        cls_filter = None  # ignored when per_model_classes is set
+        per_model_classes = [None, [0]]  # person model: all classes, phone model: class 0
     else:
-        detector = OptimisedDetector(MODEL_PATH, source=source, conf=conf, iou=iou)
+        # Default: person-only
+        active_model_path = MODEL_PATH
+        cls_filter = None
+        per_model_classes = None
+
+    print(f"[server] add_camera {cam_id}: model_type={model_type}, "
+          f"path={active_model_path}, classes={cls_filter}, per_model={per_model_classes}")
+
+    if source == "push":
+        detector = PushDetector(active_model_path, conf=conf, iou=iou,
+                                classes=cls_filter, per_model_classes=per_model_classes)
+    else:
+        detector = OptimisedDetector(active_model_path, source=source, conf=conf, iou=iou,
+                                     classes=cls_filter, per_model_classes=per_model_classes)
 
     detector.start()
     _detectors[cam_id] = detector
