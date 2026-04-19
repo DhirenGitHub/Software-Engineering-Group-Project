@@ -2,18 +2,20 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import PageLayout from '../components/layout/PageLayout'
 import CameraGrid from '../components/dashboard/CameraGrid'
-import AlertsPanel from '../components/dashboard/AlertsPanel'
+import AlertsPanel from '../components/dashboard/AlertsPanelLive'
 import ZoneAnalytics from '../components/dashboard/ZoneAnalytics'
 import FootfallChart from '../components/dashboard/FootfallChart'
 import SearchPanel from '../components/dashboard/SearchPanel'
 import AddCameraModal from '../components/settings/AddCameraModal'
 import { useCameras } from '../context/CameraContext'
-import { alerts, zoneAnalytics, footfallData } from '../data/mockData'
+import { zoneAnalytics, footfallData } from '../data/mockData'
+import useLiveAlerts from '../hooks/useLiveAlerts'
 import { Settings, Cpu } from 'lucide-react'
 
 export default function DashboardPage() {
   const navigate = useNavigate()
   const { cameras, addCamera } = useCameras()
+  const { alerts, status: alertsStatus } = useLiveAlerts()
   const [modalOpen, setModalOpen] = useState(false)
   const [detectionOn, setDetectionOn] = useState(true)
 
@@ -25,7 +27,7 @@ export default function DashboardPage() {
         </div>
 
         <aside style={styles.sidebar}>
-          <AlertsPanel alerts={alerts} />
+          <AlertsPanel alerts={alerts} status={alertsStatus} />
           <ZoneAnalytics data={zoneAnalytics} />
           <SearchPanel />
           <FootfallChart data={footfallData} />

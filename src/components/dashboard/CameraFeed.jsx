@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { Video, WifiOff, Loader } from 'lucide-react'
 import Hls from 'hls.js'
 
+const DETECTION_SERVER = 'http://localhost:5000'
+
 /**
  * CameraFeed — renders the correct video element for each sourceType,
  * with detection overlays on top.
  */
 export default function CameraFeed({ camera, detectionOn = true }) {
-  const { label, location, overlays = {}, sourceType, sourceUrl, rawUrl, rawSourceType } = camera
+  const { label, location, overlays = {}, sourceType, sourceUrl, rawUrl, rawSourceType, backendId } = camera
 
   const [heatmapOn, setHeatmapOn] = useState(false)
 
@@ -37,6 +39,9 @@ export default function CameraFeed({ camera, detectionOn = true }) {
   return (
     <div style={styles.wrapper}>
       <div style={styles.feedBg}>
+        {rawSourceType === 'device' && backendId && detectionOn && (
+          <DevicePushBridge backendId={backendId} deviceId={rawUrl} />
+        )}
 
         {/* ── Video layer ── */}
         <FeedVideo sourceType={activeType} sourceUrl={activeUrl} />
@@ -186,6 +191,81 @@ function DeviceFeed({ deviceId }) {
       muted
       playsInline
     />
+  )
+}
+
+function DevicePushBridge({ backendId, deviceId }) {
+  const videoRef = useRef(null)
+  const canvasRef = useRef(null)
+
+  useEffect(() => {
+    let stream = null
+    let timer = null
+    let cancelled = false
+    let sending = false
+
+    const start = async () => {
+      try {
+        const constraints = {
+          video: deviceId ? { deviceId: { exact: deviceId } } : true,
+          audio: false,
+        }
+        stream = await navigator.mediaDevices.getUserMedia(constraints)
+        if (cancelled || !videoRef.current) return
+        videoRef.current.srcObject = stream
+        await videoRef.current.play().catch(() => {})
+
+        timer = window.setInterval(async () => {
+          if (cancelled || sending || !videoRef.current || !canvasRef.current) return
+          if (videoRef.current.readyState < 2) return
+
+          const canvas = canvasRef.current
+          const video = videoRef.current
+          canvas.width = video.videoWidth || 640
+          canvas.height = video.videoHeight || 480
+          const context = canvas.getContext('2d')
+          if (!context) return
+
+          sending = true
+          try {
+            context.drawImage(video, 0, 0, canvas.width, canvas.height)
+            const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.7))
+            if (!blob) return
+            await fetch(`${DETECTION_SERVER}/frame/${backendId}`, {
+              method: 'POST',
+              body: blob,
+            })
+          } catch {
+            // Keep retrying silently while the feed is active.
+          } finally {
+            sending = false
+          }
+        }, 180)
+      } catch {
+        // The visible feed will show stale/offline behaviour if the browser camera is unavailable.
+      }
+    }
+
+    start()
+
+    return () => {
+      cancelled = true
+      if (timer) window.clearInterval(timer)
+      stream?.getTracks().forEach((track) => track.stop())
+    }
+  }, [backendId, deviceId])
+
+  return (
+    <>
+      <video
+        ref={videoRef}
+        autoPlay
+        muted
+        playsInline
+        style={{ display: 'none' }}
+      />
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
+    </>
   )
 }
 

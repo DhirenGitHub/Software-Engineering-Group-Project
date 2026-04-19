@@ -37,10 +37,17 @@ POST /cameras body (JSON):
     }
 """
 
+import sys
 import socket
 import time
+
+# Force unbuffered stdout so logs appear in real-time
+if not sys.stdout.line_buffering:
+    sys.stdout.reconfigure(line_buffering=True)
 import uuid
+import threading
 from pathlib import Path
+from collections import deque
 
 import cv2
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -52,9 +59,12 @@ MODEL_PATH       = str(Path(__file__).parent.parent / "assets" / "YOLO.onnx")
 PHONE_MODEL_PATH = str(Path(__file__).parent.parent / "assets" / "phone_best.pt")
 COCO_MODEL_PATH  = str(Path(__file__).parent.parent / "assets" / "yolov8n.pt")
 CROPS_DIR  = str(Path(__file__).parent / "crops")
+ALERT_PREVIEWS_DIR = Path(__file__).parent / "alert_previews"
 HOST       = "0.0.0.0"
 PORT       = 5000
 JPEG_Q     = 75
+
+ALERT_PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ── Discover local IP (so we can print the phone URL) ─────────────────────────
@@ -72,6 +82,41 @@ def _local_ip() -> str:
 # ── App ───────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 _detectors: dict[str, OptimisedDetector | PushDetector] = {}
+_alerts = deque(maxlen=60)
+_alert_cooldowns: dict[tuple[str, str], float] = {}
+_alert_counter = 0
+
+ALERT_COOLDOWNS = {
+    "phone": 8.0,
+    "crowd": 12.0,
+    "offline": 20.0,
+}
+
+ALERT_KINDS = {
+    "phone": {
+        "severity": "warning",
+        "priorityLabel": "Medium",
+        "category": "Device Misuse",
+        "status": "open",
+    },
+    "crowd": {
+        "severity": "warning",
+        "priorityLabel": "Medium",
+        "category": "Crowd Monitoring",
+        "status": "open",
+    },
+    "offline": {
+        "severity": "info",
+        "priorityLabel": "Low",
+        "category": "Feed Health",
+        "status": "open",
+    },
+}
+
+ALERT_THRESHOLDS = {
+    "crowd_people": 4,
+    "offline_after": 8.0,
+}
 
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
@@ -87,11 +132,193 @@ def _options(path):
     return _cors(Response())
 
 
+def _next_alert_id():
+    global _alert_counter
+    _alert_counter += 1
+    return _alert_counter
+
+
+def _format_timestamp(ts: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(ts))
+
+
+def _delete_alert_preview(preview_name: str | None):
+    if not preview_name:
+        return
+
+    try:
+        preview_path = ALERT_PREVIEWS_DIR / preview_name
+        if preview_path.exists():
+            preview_path.unlink()
+    except OSError:
+        pass
+
+
+def _capture_alert_preview(cam_id: str, alert_id: int):
+    detector = _detectors.get(cam_id)
+    if detector is None:
+        return None, None
+
+    frame, _ = detector.get_latest()
+    if frame is None:
+        return None, None
+
+    preview_name = f"alert_{alert_id}.jpg"
+    preview_path = ALERT_PREVIEWS_DIR / preview_name
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_Q])
+    if not ok:
+        return None, None
+
+    preview_path.write_bytes(buf.tobytes())
+    return f"http://localhost:{PORT}/alert-previews/{preview_name}", preview_name
+
+
+def _push_alert(cam_id: str, kind: str, alert_type: str, target: str, detail: str, ts: float):
+    cooldown_key = (cam_id, kind)
+    last_emitted = _alert_cooldowns.get(cooldown_key, 0.0)
+    cooldown = ALERT_COOLDOWNS.get(kind, 10.0)
+    if ts - last_emitted < cooldown:
+        return
+
+    _alert_cooldowns[cooldown_key] = ts
+    alert_id = _next_alert_id()
+    alert_config = ALERT_KINDS.get(kind, {
+        "severity": "warning",
+        "priorityLabel": "Medium",
+        "category": "General",
+        "status": "open",
+    })
+    preview_url, preview_file = _capture_alert_preview(cam_id, alert_id)
+    alert_obj = {
+        "id": alert_id,
+        "cameraId": cam_id,
+        "kind": kind,
+        "severity": alert_config["severity"],
+        "priorityLabel": alert_config["priorityLabel"],
+        "category": alert_config["category"],
+        "status": alert_config["status"],
+        "type": alert_type,
+        "target": target,
+        "detail": detail,
+        "timestamp": _format_timestamp(ts),
+        "eventTime": ts,
+        "previewUrl": preview_url,
+        "previewFile": preview_file,
+    }
+    if len(_alerts) >= _alerts.maxlen:
+        expired = _alerts.pop()
+        _delete_alert_preview(expired.get("previewFile"))
+    _alerts.appendleft(alert_obj)
+    print(f"[alerts] ✅ FIRED #{alert_obj['id']}: {alert_type} on {cam_id} — {detail}")
+
+
+def _sync_alerts():
+    now = time.time()
+
+    for cam_id, detector in _detectors.items():
+        stats = detector.get_latest_stats() if hasattr(detector, "get_latest_stats") else {}
+        if not stats:
+            continue
+
+        updated_at = float(stats.get("updated_at") or 0.0)
+        has_frame = bool(stats.get("has_frame"))
+
+        # ── Use peak stats (accumulated since last consume) for reliable alerting
+        peaks = detector.consume_peak_stats() if hasattr(detector, "consume_peak_stats") else {}
+        peak_phone = int(peaks.get("peak_phone_count") or 0)
+        peak_person = int(peaks.get("peak_person_count") or 0)
+
+        # Also check current frame (in case consume just reset peaks)
+        cur_phone = int(stats.get("phone_count") or 0)
+        cur_person = int(stats.get("person_count") or 0)
+        phone_count = max(peak_phone, cur_phone)
+        person_count = max(peak_person, cur_person)
+
+        # Always use wall-clock time so the cooldown timer actually progresses
+        alert_ts = now
+
+        if phone_count > 0 or person_count > 0:
+            print(f"[alerts] {cam_id}: phone={phone_count} (peak={peak_phone}, cur={cur_phone}), "
+                  f"person={person_count} (peak={peak_person}, cur={cur_person})")
+
+        if phone_count > 0:
+            _push_alert(
+                cam_id=cam_id,
+                kind="phone",
+                alert_type="Phone Detection",
+                target=cam_id,
+                detail=f"{phone_count} phone{'s' if phone_count != 1 else ''} detected on this feed",
+                ts=alert_ts,
+            )
+
+        if person_count >= ALERT_THRESHOLDS["crowd_people"]:
+            _push_alert(
+                cam_id=cam_id,
+                kind="crowd",
+                alert_type="Zone Capacity Warning",
+                target=cam_id,
+                detail=f"{person_count} people visible in the current frame",
+                ts=alert_ts,
+            )
+
+        if has_frame and updated_at and now - updated_at >= ALERT_THRESHOLDS["offline_after"]:
+            _push_alert(
+                cam_id=cam_id,
+                kind="offline",
+                alert_type="Feed Timeout",
+                target=cam_id,
+                detail="No fresh frames received recently from this camera",
+                ts=now,
+            )
+
+
+def _alert_sync_loop():
+    """Background thread: runs _sync_alerts every 3 seconds so alerts fire
+    proactively even when no frontend is polling."""
+    while True:
+        time.sleep(3)
+        try:
+            _sync_alerts()
+        except Exception as exc:
+            print(f"[alerts] sync error: {exc}")
+
+
 # ── REST routes ───────────────────────────────────────────────────────────────
 
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "cameras": list(_detectors.keys())})
+
+
+@app.route("/debug/<cam_id>")
+def debug_camera(cam_id):
+    """Return raw detection stats for a camera — for debugging."""
+    d = _detectors.get(cam_id)
+    if d is None:
+        return jsonify({"error": "not found"}), 404
+    stats = d.get_latest_stats() if hasattr(d, "get_latest_stats") else {}
+    peaks = {"peak_phone_count": d._peak_stats.get("peak_phone_count", 0),
+             "peak_person_count": d._peak_stats.get("peak_person_count", 0),
+             "peak_updated_at": d._peak_stats.get("peak_updated_at", 0)} if hasattr(d, "_peak_stats") else {}
+    return jsonify({
+        "cam_id": cam_id,
+        "current_stats": stats,
+        "peak_stats_snapshot": peaks,
+        "alert_count": len(_alerts),
+        "detector_running": getattr(d, "_running", None),
+        "model_paths": getattr(d, "model_paths", []),
+    })
+
+
+@app.route("/alerts", methods=["GET"])
+def list_alerts():
+    # No need to call _sync_alerts() here — the background thread handles it
+    return jsonify(list(_alerts))
+
+
+@app.route("/alert-previews/<path:filename>", methods=["GET"])
+def alert_preview(filename):
+    return send_from_directory(ALERT_PREVIEWS_DIR, filename)
 
 
 @app.route("/cameras", methods=["GET"])
@@ -154,6 +381,7 @@ def add_camera():
 
     detector.start()
     _detectors[cam_id] = detector
+    _sync_alerts()
 
     ip = _local_ip()
     return jsonify({
@@ -183,6 +411,7 @@ def push_frame(cam_id):
         return jsonify({"error": "camera is not a push type"}), 400
 
     d.push_frame(request.data)
+    _sync_alerts()
     return "", 204
 
 
@@ -441,4 +670,7 @@ if __name__ == "__main__":
     print(f'       -d \'{{"id":"CAM01","source":"UI/public/test.mp4"}}\'')
     print("  ──────────────────────────────────────────────────────────")
     print()
+    # Start background alert sync thread
+    threading.Thread(target=_alert_sync_loop, daemon=True).start()
+    print("[server] Alert sync thread started (every 3s)")
     app.run(host=HOST, port=PORT, threaded=True)

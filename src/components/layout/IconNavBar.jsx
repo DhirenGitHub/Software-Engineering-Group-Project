@@ -1,7 +1,8 @@
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutGrid,
-  BarChart2,
+  TriangleAlert,
+  BarChart3,
   Settings,
   User,
 } from 'lucide-react'
@@ -12,7 +13,8 @@ import {
  */
 const navItems = [
   { icon: LayoutGrid, path: '/',          tooltip: 'Live Dashboard' },
-  { icon: BarChart2,  path: '/analytics', tooltip: 'Analytics'      },
+  { icon: TriangleAlert, path: '/alerts', tooltip: 'Alerts & Events' },
+  { icon: BarChart3,  path: '/analytics', tooltip: 'Analytics'      },
   { icon: Settings,   path: '/settings',  tooltip: 'Settings'       },
 ]
 

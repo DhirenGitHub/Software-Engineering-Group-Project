@@ -3,6 +3,32 @@ import { X, Wifi, WifiOff } from 'lucide-react'
 import Button from '../ui/Button'
 import StatusDot from '../ui/StatusDot'
 
+const DETECTION_SERVER = 'http://localhost:5000'
+const BACKEND_REGISTERED_SOURCE_TYPES = new Set(['ai_backend', 'device', 'file'])
+
+function getDefaultTargetModel(sourceType) {
+  return 'person'
+}
+
+function buildEmptyForm() {
+  return {
+    name: '',
+    location: '',
+    sourceType: 'mjpeg_http',
+    sourceUrl: '',
+    targetModel: getDefaultTargetModel('mjpeg_http'),
+    features: [],
+  }
+}
+
+function resolveTargetModel(nextSourceType, previousSourceType, currentTargetModel) {
+  if (!currentTargetModel || currentTargetModel === getDefaultTargetModel(previousSourceType)) {
+    return getDefaultTargetModel(nextSourceType)
+  }
+
+  return currentTargetModel
+}
+
 
 const SOURCE_TYPES = [
   { value: 'rtsp',       label: 'RTSP',        description: 'Real IP camera stream' },
@@ -34,14 +60,7 @@ const URL_HINTS = {
   device:     'The browser will prompt for camera permission. Leave URL blank to use the default webcam, or enter a deviceId.',
 }
 
-const EMPTY_FORM = {
-  name: '',
-  location: '',
-  sourceType: 'mjpeg_http',
-  sourceUrl: '',
-  targetModel: 'person',
-  features: [],   // populated later from the monitoring view
-}
+const EMPTY_FORM = buildEmptyForm()
 
 /**
  * AddCameraModal — slide-in right panel / centered modal for adding or editing a camera.
@@ -65,9 +84,10 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
           ...initial,
           sourceType: initial.rawSourceType || initial.sourceType,
           sourceUrl: initial.rawUrl !== undefined ? initial.rawUrl : initial.sourceUrl,
+          targetModel: initial.targetModel || getDefaultTargetModel(initial.rawSourceType || initial.sourceType),
         })
       } else {
-        setForm(EMPTY_FORM)
+        setForm(buildEmptyForm())
       }
       setTestState('idle')
     }
@@ -89,25 +109,27 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
     if (!form.name.trim()) return
     setIsSaving(true)
     let finalForm = { ...form, name: form.name.trim(), location: form.location.trim() }
+    const shouldRegisterBackend = BACKEND_REGISTERED_SOURCE_TYPES.has(finalForm.sourceType)
+    const selectedModel = finalForm.targetModel || getDefaultTargetModel(finalForm.sourceType)
 
-    if (finalForm.sourceType === 'ai_backend' || finalForm.sourceType === 'device') {
+    if (shouldRegisterBackend) {
       try {
         // If editing, attempt to delete old backend stream first to free up the webcam
         if (initial && initial.backendId) {
           try {
-            await fetch(`http://localhost:5000/cameras/${initial.backendId}`, { method: 'DELETE' })
+            await fetch(`${DETECTION_SERVER}/cameras/${initial.backendId}`, { method: 'DELETE' })
           } catch (e) { /* ignore fail */ }
         }
-        const camId = `CAM_${finalForm.name.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}_${Math.floor(Math.random()*1000)}`
-        let backendSource = finalForm.sourceUrl;
-        if (finalForm.sourceType === 'device' && !backendSource.trim()) {
-            backendSource = "0";
+        const camId = initial?.backendId || `CAM_${finalForm.name.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}_${Math.floor(Math.random()*1000)}`
+        let backendSource = finalForm.sourceUrl
+        if (finalForm.sourceType === 'device') {
+            backendSource = "push";
         }
 
-        const res = await fetch("http://localhost:5000/cameras", {
+        const res = await fetch(`${DETECTION_SERVER}/cameras`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: camId, source: backendSource, model: finalForm.targetModel })
+          body: JSON.stringify({ id: camId, source: backendSource, model: selectedModel })
         })
         if (res.ok) {
           const data = await res.json()
@@ -116,12 +138,17 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
           finalForm.rawSourceType = form.sourceType
           finalForm.rawUrl = form.sourceUrl
           finalForm.backendId = camId
+          finalForm.targetModel = selectedModel
         } else {
           alert("Failed to register with AI backend. Is the Python server running?")
+          setIsSaving(false)
+          return
         }
       } catch (err) {
         console.error(err)
         alert("Error connecting to AI backend. Ensure 'python server/app.py' is running.")
+        setIsSaving(false)
+        return
       }
     }
 
@@ -200,7 +227,15 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
               <select
                 style={styles.select}
                 value={form.sourceType}
-                onChange={(e) => { set('sourceType', e.target.value); set('sourceUrl', '') }}
+                onChange={(e) => {
+                  const nextSourceType = e.target.value
+                  setForm((current) => ({
+                    ...current,
+                    sourceType: nextSourceType,
+                    sourceUrl: '',
+                    targetModel: resolveTargetModel(nextSourceType, current.sourceType, current.targetModel),
+                  }))
+                }}
               >
                 {SOURCE_TYPES.map((s) => (
                   <option key={s.value} value={s.value}>
@@ -215,12 +250,12 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
             <div style={styles.selectWrapper}>
               <select
                 style={styles.select}
-                value={form.targetModel || 'person'}
+                value={form.targetModel || getDefaultTargetModel(form.sourceType)}
                 onChange={(e) => set('targetModel', e.target.value)}
               >
-                <option value="person">Person Detection (Default)</option>
+                <option value="person">Person Detection</option>
+                <option value="both">Person & Phone Detection</option>
                 <option value="phone">Phone Detection</option>
-                <option value="both">Person & Phone Detection (Combined)</option>
               </select>
             </div>
           </Field>

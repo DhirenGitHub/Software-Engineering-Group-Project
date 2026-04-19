@@ -17,6 +17,17 @@ from ultralytics import YOLO
 
 _global_models = {}
 
+
+def classify_detection_label(label) -> str | None:
+    normalized = str(label).strip().lower()
+    if not normalized:
+        return None
+    if "phone" in normalized or "cell" in normalized:
+        return "phone"
+    if "person" in normalized:
+        return "person"
+    return None
+
 def get_yolo_model(path: str):
     if path not in _global_models:
         print(f"[backend] Loading YOLO cache for {path} …")
@@ -233,6 +244,18 @@ class OptimisedDetector:
         self._latest_frame:     cv2.typing.MatLike | None = None
         self._annotated_frame:  cv2.typing.MatLike | None = None
         self._count:            int                        = 0
+        self._latest_stats      = {
+            "person_count": 0,
+            "phone_count": 0,
+            "total_count": 0,
+            "updated_at": 0.0,
+            "has_frame": False,
+        }
+        self._peak_stats        = {
+            "peak_phone_count": 0,
+            "peak_person_count": 0,
+            "peak_updated_at": 0.0,
+        }
         self._lock              = threading.Lock()
         self._running           = False
 
@@ -267,6 +290,19 @@ class OptimisedDetector:
         """Returns (annotated_frame_bgr, person_count) or (None, 0)."""
         with self._lock:
             return self._annotated_frame, self._count
+
+    def get_latest_stats(self):
+        with self._lock:
+            return dict(self._latest_stats)
+
+    def consume_peak_stats(self):
+        """Return peak phone/person counts since last consume, then reset peaks."""
+        with self._lock:
+            peaks = dict(self._peak_stats)
+            self._peak_stats["peak_phone_count"] = 0
+            self._peak_stats["peak_person_count"] = 0
+            self._peak_stats["peak_updated_at"] = 0.0
+            return peaks
 
     def get_latest_heatmap(self):
         """Returns heatmap_frame_bgr or None if not yet available."""
@@ -313,6 +349,8 @@ class OptimisedDetector:
 
             annotated = frame.copy()
             total_count = 0
+            person_count = 0
+            phone_count = 0
             all_boxes = []
 
             for idx, m in enumerate(self.models):
@@ -343,6 +381,13 @@ class OptimisedDetector:
                     count = len(results[0].boxes)
                     if count:
                         all_boxes.append(results[0].boxes.xyxy.cpu().numpy())
+                        class_ids = results[0].boxes.cls.int().cpu().tolist()
+                        for class_id in class_ids:
+                            label_kind = classify_detection_label(m.names.get(class_id, class_id))
+                            if label_kind == "phone":
+                                phone_count += 1
+                            elif label_kind == "person":
+                                person_count += 1
                     total_count += count
                 except Exception as e:
                     print(f"[detector] Error in inference loop for model {idx}: {e}")
@@ -355,14 +400,29 @@ class OptimisedDetector:
                 self._heat_accumulator = np.zeros((h, w), dtype=np.float32)
             boxes = np.vstack(all_boxes) if all_boxes else np.empty((0, 4))
             heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
+            now = time.time()
 
             with self._lock:
                 self._annotated_frame = annotated
                 self._count           = total_count
                 self._heatmap_frame   = heatmap_frm
+                self._latest_stats    = {
+                    "person_count": person_count,
+                    "phone_count": phone_count,
+                    "total_count": total_count,
+                    "updated_at": now,
+                    "has_frame": True,
+                }
+                # Accumulate peaks so alerts never miss transient detections
+                if phone_count > self._peak_stats["peak_phone_count"]:
+                    self._peak_stats["peak_phone_count"] = phone_count
+                    self._peak_stats["peak_updated_at"] = now
+                if person_count > self._peak_stats["peak_person_count"]:
+                    self._peak_stats["peak_person_count"] = person_count
+                    if not self._peak_stats["peak_updated_at"]:
+                        self._peak_stats["peak_updated_at"] = now
 
             # queue person crops for CLIP indexing (rate-limited, never blocks inference)
-            now = time.time()
             if _clip_ready and total_count and (now - self._last_index_time) >= _INDEX_INTERVAL:
                 self._last_index_time = now
                 for x1, y1, x2, y2 in boxes:
@@ -415,6 +475,18 @@ class PushDetector:
         self._latest_frame:    np.ndarray | None = None
         self._annotated_frame: np.ndarray | None = None
         self._count:           int               = 0
+        self._latest_stats     = {
+            "person_count": 0,
+            "phone_count": 0,
+            "total_count": 0,
+            "updated_at": 0.0,
+            "has_frame": False,
+        }
+        self._peak_stats       = {
+            "peak_phone_count": 0,
+            "peak_person_count": 0,
+            "peak_updated_at": 0.0,
+        }
         self._lock             = threading.Lock()
         self._running          = False
         self._frame_id         = 0   # incremented each push so inference skips dupes
@@ -448,6 +520,19 @@ class PushDetector:
         with self._lock:
             return self._annotated_frame, self._count
 
+    def get_latest_stats(self):
+        with self._lock:
+            return dict(self._latest_stats)
+
+    def consume_peak_stats(self):
+        """Return peak phone/person counts since last consume, then reset peaks."""
+        with self._lock:
+            peaks = dict(self._peak_stats)
+            self._peak_stats["peak_phone_count"] = 0
+            self._peak_stats["peak_person_count"] = 0
+            self._peak_stats["peak_updated_at"] = 0.0
+            return peaks
+
     def get_latest_heatmap(self):
         """Returns heatmap_frame_bgr or None if not yet available."""
         with self._lock:
@@ -472,6 +557,8 @@ class PushDetector:
 
             annotated = frame.copy()
             total_count = 0
+            person_count = 0
+            phone_count = 0
             all_boxes = []
 
             for idx, m in enumerate(self.models):
@@ -499,6 +586,13 @@ class PushDetector:
                     count = len(results[0].boxes)
                     if count:
                         all_boxes.append(results[0].boxes.xyxy.cpu().numpy())
+                        class_ids = results[0].boxes.cls.int().cpu().tolist()
+                        for class_id in class_ids:
+                            label_kind = classify_detection_label(m.names.get(class_id, class_id))
+                            if label_kind == "phone":
+                                phone_count += 1
+                            elif label_kind == "person":
+                                person_count += 1
                     total_count += count
                 except Exception as e:
                     print(f"[push-detector] Error in inference loop for model {idx}: {e}")
@@ -509,14 +603,29 @@ class PushDetector:
                 self._heat_accumulator = np.zeros((h, w), dtype=np.float32)
             boxes = np.vstack(all_boxes) if all_boxes else np.empty((0, 4))
             heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
+            now = time.time()
 
             with self._lock:
                 self._annotated_frame = annotated
                 self._count           = total_count
                 self._heatmap_frame   = heatmap_frm
+                self._latest_stats    = {
+                    "person_count": person_count,
+                    "phone_count": phone_count,
+                    "total_count": total_count,
+                    "updated_at": now,
+                    "has_frame": True,
+                }
+                # Accumulate peaks so alerts never miss transient detections
+                if phone_count > self._peak_stats["peak_phone_count"]:
+                    self._peak_stats["peak_phone_count"] = phone_count
+                    self._peak_stats["peak_updated_at"] = now
+                if person_count > self._peak_stats["peak_person_count"]:
+                    self._peak_stats["peak_person_count"] = person_count
+                    if not self._peak_stats["peak_updated_at"]:
+                        self._peak_stats["peak_updated_at"] = now
 
             # queue person crops for CLIP indexing (rate-limited, never blocks inference)
-            now = time.time()
             if _clip_ready and total_count and (now - self._last_index_time) >= _INDEX_INTERVAL:
                 self._last_index_time = now
                 for x1, y1, x2, y2 in boxes:
