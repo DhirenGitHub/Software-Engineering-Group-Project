@@ -52,7 +52,7 @@ from collections import deque
 import cv2
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from detector import OptimisedDetector, PushDetector, search_clips
+from detector import OptimisedDetector, PushDetector, get_clip_status, search_clips
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MODEL_PATH       = str(Path(__file__).parent.parent / "assets" / "YOLO.onnx")
@@ -118,6 +118,14 @@ ALERT_THRESHOLDS = {
     "offline_after": 8.0,
 }
 
+ANALYTICS_CONFIG = {
+    "detection_confidence": 0.40,
+    "nms_iou": 0.45,
+    "crowd_threshold": ALERT_THRESHOLDS["crowd_people"],
+    "offline_after_seconds": ALERT_THRESHOLDS["offline_after"],
+    "default_model": "person",
+}
+
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 @app.after_request
@@ -140,6 +148,62 @@ def _next_alert_id():
 
 def _format_timestamp(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
+
+
+def _resolve_compute_device() -> str:
+    try:
+        import torch
+        return "GPU (CUDA)" if torch.cuda.is_available() else "CPU"
+    except Exception:
+        return "CPU"
+
+
+def _serialize_analytics_config():
+    search_status = get_clip_status()
+    return {
+        **ANALYTICS_CONFIG,
+        "activeCameraCount": len(_detectors),
+        "searchBackend": "ChromaDB",
+        "searchReady": bool(search_status.get("ready")),
+        "computeDevice": _resolve_compute_device(),
+        "availableModels": [
+            {"value": "person", "label": "Person Detection"},
+            {"value": "both", "label": "Person & Phone Detection"},
+            {"value": "phone", "label": "Phone Detection"},
+        ],
+    }
+
+
+def _apply_analytics_config(updates: dict):
+    detection_confidence = updates.get("detection_confidence")
+    if detection_confidence is not None:
+        detection_confidence = max(0.05, min(0.95, float(detection_confidence)))
+        ANALYTICS_CONFIG["detection_confidence"] = detection_confidence
+        for detector in _detectors.values():
+            detector.conf = detection_confidence
+
+    nms_iou = updates.get("nms_iou")
+    if nms_iou is not None:
+        nms_iou = max(0.05, min(0.95, float(nms_iou)))
+        ANALYTICS_CONFIG["nms_iou"] = nms_iou
+        for detector in _detectors.values():
+            detector.iou = nms_iou
+
+    crowd_threshold = updates.get("crowd_threshold")
+    if crowd_threshold is not None:
+        crowd_threshold = max(1, min(50, int(crowd_threshold)))
+        ANALYTICS_CONFIG["crowd_threshold"] = crowd_threshold
+        ALERT_THRESHOLDS["crowd_people"] = crowd_threshold
+
+    offline_after = updates.get("offline_after_seconds")
+    if offline_after is not None:
+        offline_after = max(3.0, min(120.0, float(offline_after)))
+        ANALYTICS_CONFIG["offline_after_seconds"] = offline_after
+        ALERT_THRESHOLDS["offline_after"] = offline_after
+
+    default_model = updates.get("default_model")
+    if default_model in {"person", "both", "phone"}:
+        ANALYTICS_CONFIG["default_model"] = default_model
 
 
 def _delete_alert_preview(preview_name: str | None):
@@ -290,6 +354,14 @@ def health():
     return jsonify({"status": "ok", "cameras": list(_detectors.keys())})
 
 
+@app.route("/analytics/config", methods=["GET", "POST"])
+def analytics_config():
+    if request.method == "POST":
+        body = request.get_json(force=True) or {}
+        _apply_analytics_config(body)
+    return jsonify(_serialize_analytics_config())
+
+
 @app.route("/debug/<cam_id>")
 def debug_camera(cam_id):
     """Return raw detection stats for a camera — for debugging."""
@@ -334,9 +406,9 @@ def add_camera():
     body   = request.get_json(force=True)
     cam_id = body.get("id") or f"CAM{str(uuid.uuid4())[:4].upper()}"
     source = body.get("source", "push")
-    conf   = float(body.get("conf", 0.40))
-    iou    = float(body.get("iou",  0.45))
-    model_type = body.get("model", "person")
+    conf   = float(body.get("conf", ANALYTICS_CONFIG["detection_confidence"]))
+    iou    = float(body.get("iou",  ANALYTICS_CONFIG["nms_iou"]))
+    model_type = body.get("model", ANALYTICS_CONFIG["default_model"])
 
     if cam_id in _detectors:
         return jsonify({"error": f"{cam_id} already exists"}), 409
@@ -492,11 +564,35 @@ def search_route():
     if not query:
         return jsonify({"error": "query required"}), 400
 
-    results = search_clips(query, n_results=5)
-    ip = _local_ip()
+    try:
+        results = search_clips(query, n_results=5)
+    except RuntimeError as exc:
+        return jsonify({
+            "error": "smart search unavailable",
+            "detail": str(exc),
+            "searchStatus": get_clip_status(),
+        }), 503
+    except Exception as exc:
+        return jsonify({
+            "error": "smart search failed",
+            "detail": str(exc),
+        }), 500
+
+    base_url = request.host_url.rstrip("/")
     for r in results:
-        r["image_url"] = f"http://{ip}:{PORT}/crops/{r['image_file']}"
+        r["image_url"] = f"{base_url}/crops/{r['image_file']}"
     return jsonify(results)
+
+
+@app.route("/search/status", methods=["GET"])
+def search_status():
+    status = get_clip_status()
+    status.update({
+        "cameraCount": len(_detectors),
+        "cameras": list(_detectors.keys()),
+        "searchEndpoint": "/search",
+    })
+    return jsonify(status)
 
 
 @app.route("/crops/<path:filename>")

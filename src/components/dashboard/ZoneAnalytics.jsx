@@ -1,27 +1,22 @@
 import { MapPin } from 'lucide-react'
 
-/**
- * ZoneAnalytics — Queue / Dwell / Loiter stat cards.
- */
-export default function ZoneAnalytics({ data }) {
-  const stats = [
-    { key: 'QUEUE',  value: data.queue  },
-    { key: 'DWELL',  value: data.dwell  },
-    { key: 'LOITER', value: data.loiter },
-  ]
+export default function ZoneAnalytics({ stats = [], title = 'ZONE ANALYTICS', subtitle = '(LIVE)' }) {
+  const statsGridStyle = stats.length > 3
+    ? styles.statsCompact
+    : styles.stats
 
   return (
     <div style={styles.panel}>
       <div style={styles.header}>
         <MapPin size={12} color="#626261" strokeWidth={1.5} />
-        <span style={styles.title}>ZONE ANALYTICS</span>
-        <span style={styles.subtitle}>(LIVE)</span>
+        <span style={styles.title}>{title}</span>
+        <span style={styles.subtitle}>{subtitle}</span>
       </div>
-      <div style={styles.stats}>
+      <div style={statsGridStyle}>
         {stats.map(({ key, value }) => (
           <div key={key} style={styles.statCard}>
-            <span style={styles.statLabel}>{key}</span>
             <span style={styles.statValue}>{value}</span>
+            <span style={styles.statLabel}>{key}</span>
           </div>
         ))}
       </div>
@@ -33,14 +28,14 @@ const styles = {
   panel: {
     borderTop: '1px solid #141414',
     borderBottom: '1px solid #141414',
-    padding: '10px 12px',
+    padding: '12px',
     flexShrink: 0,
   },
   header: {
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
-    marginBottom: '10px',
+    marginBottom: '12px',
   },
   title: {
     fontSize: '10px',
@@ -54,31 +49,38 @@ const styles = {
     letterSpacing: '0.04em',
   },
   stats: {
-    display: 'flex',
-    gap: '6px',
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+    gap: '8px',
+  },
+  statsCompact: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: '8px',
   },
   statCard: {
-    flex: 1,
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    gap: '4px',
+    justifyContent: 'center',
+    gap: '6px',
+    minHeight: '68px',
     backgroundColor: '#0a0a0a',
     border: '1px solid #141414',
-    borderRadius: '4px',
+    borderRadius: '6px',
     padding: '10px 6px',
+  },
+  statValue: {
+    fontSize: '16px',
+    fontWeight: 700,
+    color: '#d0d1cf',
+    letterSpacing: '-0.01em',
+    fontVariantNumeric: 'tabular-nums',
   },
   statLabel: {
     fontSize: '8px',
     fontWeight: 700,
-    color: '#3c3d3c',
-    letterSpacing: '0.07em',
-  },
-  statValue: {
-    fontSize: '18px',
-    fontWeight: 700,
-    color: '#8a8b89',
-    letterSpacing: '-0.01em',
-    fontVariantNumeric: 'tabular-nums',
+    color: '#4c4d4c',
+    letterSpacing: '0.08em',
   },
 }

@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
+import { DETECTION_SERVER } from '../lib/detectionServer'
 
-const DETECTION_SERVER = 'http://localhost:5000'
 const POLL_MS = 2000
+const FETCH_TIMEOUT_MS = 5000
 
 function normalizeAlert(alert) {
   const severity = alert?.severity || 'warning'
@@ -27,20 +28,30 @@ function normalizeAlert(alert) {
 export default function useLiveAlerts() {
   const [alerts, setAlerts] = useState([])
   const [status, setStatus] = useState('idle')
+  const abortRef = useRef(false)
 
   useEffect(() => {
-    let cancelled = false
+    abortRef.current = false
 
     const poll = async () => {
+      if (abortRef.current) return
+
       try {
-        const response = await fetch(`${DETECTION_SERVER}/alerts`)
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+
+        const response = await fetch(`${DETECTION_SERVER}/alerts`, {
+          signal: controller.signal,
+        })
+        clearTimeout(timeoutId)
+
         if (!response.ok) throw new Error('alerts unavailable')
         const data = await response.json()
-        if (cancelled) return
+        if (abortRef.current) return
         setAlerts(Array.isArray(data) ? data.map(normalizeAlert) : [])
         setStatus('live')
       } catch {
-        if (cancelled) return
+        if (abortRef.current) return
         setAlerts([])
         setStatus('offline')
       }
@@ -50,7 +61,7 @@ export default function useLiveAlerts() {
     const timer = window.setInterval(poll, POLL_MS)
 
     return () => {
-      cancelled = true
+      abortRef.current = true
       window.clearInterval(timer)
     }
   }, [])

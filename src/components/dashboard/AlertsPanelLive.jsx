@@ -1,8 +1,8 @@
-import { AlertTriangle, Bell } from 'lucide-react'
+import { AlertTriangle, Bell, Smartphone, Users, WifiOff } from 'lucide-react'
 import Badge from '../ui/Badge'
 
 export default function AlertsPanelLive({ alerts, status = 'idle' }) {
-  const criticalCount = alerts.filter((a) => a.severity === 'critical').length
+  const criticalCount = alerts.filter((alert) => alert.severity === 'critical' && alert.status !== 'resolved').length
   const isOffline = status === 'offline'
   const statusLabel = isOffline ? 'SERVER OFFLINE' : status === 'live' ? 'LIVE' : 'CONNECTING'
 
@@ -10,7 +10,7 @@ export default function AlertsPanelLive({ alerts, status = 'idle' }) {
     <div style={styles.panel}>
       <div style={styles.header}>
         <div style={styles.headerLeft}>
-          <Bell size={13} color="#626261" strokeWidth={1.5} />
+          <Bell size={13} color="#c9c9c7" strokeWidth={1.6} />
           <span style={styles.headerTitle}>ACTIVE ALERTS</span>
         </div>
         <div style={styles.headerBadges}>
@@ -28,7 +28,7 @@ export default function AlertsPanelLive({ alerts, status = 'idle' }) {
             <span style={styles.emptyHint}>
               {isOffline
                 ? 'Start `python server/app.py` to stream live alert events into the dashboard.'
-                : 'If detections are visible but alerts stay empty, restart `python server/app.py` once so the new alerts endpoint is loaded.'}
+                : 'Trigger a phone, crowd, or feed-health event to populate the operator alert queue.'}
             </span>
           </div>
         ) : (
@@ -42,58 +42,56 @@ export default function AlertsPanelLive({ alerts, status = 'idle' }) {
 }
 
 function AlertRow({ alert }) {
+  const icon = getAlertIcon(alert.kind || alert.type)
   const isCritical = alert.severity === 'critical'
 
   return (
-    <div style={styles.row}>
-      <AlertTriangle
-        size={12}
-        color={isCritical ? '#d52521' : '#c4891a'}
-        strokeWidth={1.5}
-        style={{ flexShrink: 0, marginTop: '1px' }}
-      />
-      <div style={styles.rowContent}>
-        <span style={styles.alertType}>{alert.type}</span>
-        <div style={styles.rowMeta}>
-          <span style={styles.metaText}>{alert.timestamp}</span>
-          <span style={styles.metaDot}>*</span>
-          <span style={styles.metaText}>{alert.target}</span>
+    <div style={{ ...styles.row, ...(isCritical ? styles.rowCritical : styles.rowDefault) }}>
+      <div style={styles.rowTop}>
+        <div style={styles.rowTitleWrap}>
+          <span style={styles.rowIcon}>{icon}</span>
+          <span style={styles.alertType}>{alert.type}</span>
         </div>
-        {alert.detail && (
-          <span style={styles.detailText}>{alert.detail}</span>
-        )}
-        <div style={styles.cameraChipRow}>
-          <span style={styles.cameraChip}>{alert.cameraId || 'LIVE FEED'}</span>
-        </div>
+        <span style={styles.alertTime}>{alert.timestamp || '--:--:--'}</span>
       </div>
-      <div
-        style={{
-          ...styles.severityBar,
-          backgroundColor: isCritical ? 'rgba(213,37,33,0.4)' : 'rgba(196,137,26,0.3)',
-        }}
-      />
+
+      <div style={styles.rowBottom}>
+        <span style={styles.alertTarget}>{alert.cameraId || alert.target || 'LIVE FEED'}</span>
+        {alert.detail && (
+          <span style={styles.alertDetail}>{alert.detail}</span>
+        )}
+      </div>
     </div>
   )
+}
+
+function getAlertIcon(kind) {
+  const label = String(kind || '').toLowerCase()
+  if (label.includes('phone')) return <Smartphone size={13} color="#ff5b51" strokeWidth={1.8} />
+  if (label.includes('crowd') || label.includes('capacity')) return <Users size={13} color="#d8b25a" strokeWidth={1.8} />
+  if (label.includes('offline') || label.includes('timeout')) return <WifiOff size={13} color="#7f8dff" strokeWidth={1.8} />
+  return <AlertTriangle size={13} color="#ff5b51" strokeWidth={1.8} />
 }
 
 const styles = {
   panel: {
     display: 'flex',
     flexDirection: 'column',
+    minHeight: 0,
     overflow: 'hidden',
   },
   header: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '10px 12px',
+    padding: '12px',
     borderBottom: '1px solid #141414',
     flexShrink: 0,
   },
   headerLeft: {
     display: 'flex',
     alignItems: 'center',
-    gap: '7px',
+    gap: '8px',
   },
   headerBadges: {
     display: 'flex',
@@ -103,96 +101,100 @@ const styles = {
   headerTitle: {
     fontSize: '10px',
     fontWeight: 700,
-    color: '#626261',
+    color: '#c9c9c7',
     letterSpacing: '0.06em',
   },
   list: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    padding: '10px 12px 12px',
     overflowY: 'auto',
-    flex: 1,
+    minHeight: 0,
   },
   emptyState: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '6px',
-    padding: '14px 12px 16px',
-    borderBottom: '1px solid #0e0e0e',
+    gap: '8px',
+    padding: '10px 4px',
   },
   emptyTitle: {
-    fontSize: '10px',
+    fontSize: '11px',
     fontWeight: 700,
-    color: '#6d6f6d',
+    color: '#8b8d8b',
     letterSpacing: '0.04em',
   },
   emptyHint: {
-    fontSize: '9px',
-    color: '#3c3d3c',
-    lineHeight: 1.5,
+    fontSize: '10px',
+    color: '#515351',
+    lineHeight: 1.6,
   },
   row: {
     display: 'flex',
-    alignItems: 'flex-start',
-    gap: '8px',
-    padding: '9px 12px',
-    borderBottom: '1px solid #0e0e0e',
-    position: 'relative',
-    transition: 'background-color 0.1s',
-    cursor: 'default',
-  },
-  rowContent: {
-    display: 'flex',
     flexDirection: 'column',
-    gap: '3px',
-    flex: 1,
-    minWidth: 0,
+    gap: '10px',
+    padding: '12px',
+    borderRadius: '6px',
+    border: '1px solid #222222',
+    backgroundColor: '#101010',
   },
-  alertType: {
-    fontSize: '10px',
-    fontWeight: 700,
-    color: '#c0c0bf',
-    letterSpacing: '0.04em',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
+  rowDefault: {
+    boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.02)',
   },
-  rowMeta: {
+  rowCritical: {
+    border: '1px solid #4f1c1c',
+    backgroundColor: '#160c0c',
+  },
+  rowTop: {
     display: 'flex',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '10px',
+  },
+  rowTitleWrap: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    minWidth: 0,
+  },
+  rowIcon: {
+    display: 'grid',
+    placeItems: 'center',
+    width: '24px',
+    height: '24px',
+    borderRadius: '6px',
+    border: '1px solid #272727',
+    backgroundColor: '#0d0d0d',
+    flexShrink: 0,
+  },
+  alertType: {
+    fontSize: '12px',
+    fontWeight: 700,
+    color: '#d0d0ce',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  alertTime: {
+    fontSize: '10px',
+    color: '#7a7b79',
+    fontVariantNumeric: 'tabular-nums',
+    flexShrink: 0,
+  },
+  rowBottom: {
+    display: 'flex',
+    flexDirection: 'column',
     gap: '4px',
   },
-  metaText: {
-    fontSize: '9px',
-    color: '#666865',
-    letterSpacing: '0.02em',
-    fontVariantNumeric: 'tabular-nums',
-  },
-  metaDot: {
-    fontSize: '9px',
-    color: '#2a2a2a',
-  },
-  detailText: {
-    fontSize: '9px',
-    color: '#484A48',
-    lineHeight: 1.45,
-  },
-  cameraChipRow: {
-    display: 'flex',
-    marginTop: '2px',
-  },
-  cameraChip: {
-    fontSize: '8px',
+  alertTarget: {
+    fontSize: '10px',
     fontWeight: 700,
-    color: '#A8AAA8',
-    backgroundColor: '#111111',
-    border: '1px solid #202020',
-    borderRadius: '999px',
-    padding: '2px 6px',
-    letterSpacing: '0.06em',
+    color: '#8e908e',
+    letterSpacing: '0.05em',
   },
-  severityBar: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: '2px',
+  alertDetail: {
+    fontSize: '10px',
+    color: '#626362',
+    lineHeight: 1.5,
   },
 }

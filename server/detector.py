@@ -71,8 +71,10 @@ def _apply_heatmap(frame, accumulator, boxes_xyxy):
 # ── CLIP / ChromaDB live indexer ─────────────────────────────────────────────
 
 _CLIP_MODEL_ID  = "openai/clip-vit-base-patch32"
+_CLIP_MODEL_DIR = Path(__file__).parent / "models" / "clip-vit-base-patch32"
 _CROPS_DIR      = str(Path(__file__).parent / "crops")
-_DB_DIR         = str(Path(__file__).parent / "chroma_db")
+_DB_DIR         = str((Path(os.getenv("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Temp" / "segp_chroma_db").resolve())
+_COLLECTION_NAME = "video_people_search"
 _INDEX_INTERVAL = 2.0   # seconds between indexed frames per detector
 
 _clip_model      = None
@@ -81,7 +83,10 @@ _clip_device     = None
 _chroma_col      = None
 _index_queue:    _queue.Queue | None = None
 _clip_ready      = False
+_clip_error      = None
 _clip_init_lock  = threading.Lock()
+_db_storage_mode = "persistent"
+_db_runtime_path = _DB_DIR
 
 _index_id_count  = 0
 _index_id_lock   = threading.Lock()
@@ -90,11 +95,11 @@ _index_id_lock   = threading.Lock()
 def _init_clip_indexer():
     """Lazily load CLIP + ChromaDB on first detector start. Thread-safe."""
     global _clip_model, _clip_processor, _clip_device, _chroma_col
-    global _index_queue, _clip_ready
+    global _index_queue, _clip_ready, _clip_error, _db_storage_mode, _db_runtime_path
 
     with _clip_init_lock:
         if _clip_ready:
-            return
+            return True
         try:
             import torch
             import chromadb
@@ -103,12 +108,23 @@ def _init_clip_indexer():
 
             os.makedirs(_CROPS_DIR, exist_ok=True)
             _clip_device    = "cuda" if torch.cuda.is_available() else "cpu"
+            clip_source     = str(_CLIP_MODEL_DIR) if _CLIP_MODEL_DIR.exists() else _CLIP_MODEL_ID
             print(f"[indexer] Loading CLIP on {_clip_device} …")
-            _clip_model     = CLIPModel.from_pretrained(_CLIP_MODEL_ID).to(_clip_device)
-            _clip_processor = CLIPProcessor.from_pretrained(_CLIP_MODEL_ID)
+            _clip_model     = CLIPModel.from_pretrained(clip_source).to(_clip_device)
+            _clip_processor = CLIPProcessor.from_pretrained(clip_source)
 
-            client      = chromadb.PersistentClient(path=_DB_DIR)
-            _chroma_col = client.get_or_create_collection(name="video_people_search")
+            db_path = Path(_DB_DIR)
+            db_path.mkdir(parents=True, exist_ok=True)
+            try:
+                client = chromadb.PersistentClient(path=str(db_path))
+                _db_storage_mode = "persistent"
+                _db_runtime_path = str(db_path)
+            except Exception as db_exc:
+                print(f"[indexer] Persistent ChromaDB unavailable, falling back to session memory ({db_exc})")
+                client = chromadb.EphemeralClient()
+                _db_storage_mode = "ephemeral"
+                _db_runtime_path = "memory"
+            _chroma_col = client.get_or_create_collection(name=_COLLECTION_NAME)
             
             global _index_id_count
             try:
@@ -120,9 +136,37 @@ def _init_clip_indexer():
             threading.Thread(target=_clip_worker, daemon=True).start()
 
             _clip_ready = True
+            _clip_error = None
             print("[indexer] CLIP + ChromaDB ready — live search enabled")
+            return True
         except Exception as exc:
+            _clip_error = str(exc)
             print(f"[indexer] CLIP unavailable — search disabled ({exc})")
+            return False
+
+
+def get_clip_status() -> dict:
+    count = 0
+    if _clip_ready and _chroma_col is not None:
+        try:
+            count = _chroma_col.count()
+        except Exception:
+            count = 0
+
+    return {
+        "ready": _clip_ready,
+        "error": _clip_error,
+        "indexed_items": count,
+        "queued_items": _index_queue.qsize() if _index_queue is not None else 0,
+        "database": "ChromaDB",
+        "collection": _COLLECTION_NAME,
+        "persist_dir": _db_runtime_path,
+        "storage_mode": _db_storage_mode,
+        "crops_dir": "server/crops",
+        "model_id": _CLIP_MODEL_ID,
+        "model_source": str(_CLIP_MODEL_DIR) if _CLIP_MODEL_DIR.exists() else _CLIP_MODEL_ID,
+        "device": _clip_device,
+    }
 
 
 def _clip_worker():
@@ -165,8 +209,8 @@ def _clip_worker():
 
 def search_clips(query_text: str, n_results: int = 5) -> list:
     """Convert text to CLIP embedding, query ChromaDB, return ranked results."""
-    if not _clip_ready:
-        return []
+    if not _clip_ready and not _init_clip_indexer():
+        raise RuntimeError(_clip_error or "Smart search is still starting up")
     try:
         import torch
         inputs = _clip_processor(text=[query_text], return_tensors="pt",

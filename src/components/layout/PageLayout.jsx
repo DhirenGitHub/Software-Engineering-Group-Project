@@ -21,7 +21,7 @@ const styles = {
   shell: {
     display: 'flex',
     height: '100vh',
-    width: '100vw',
+    width: '100%',
     backgroundColor: '#080808',
     overflow: 'hidden',
   },

@@ -1,11 +1,8 @@
 import {
   Camera,
-  Cpu,
+  SlidersHorizontal,
   Database,
-  Shield,
   Bell,
-  HardDrive,
-  Users,
 } from 'lucide-react'
 
 /**
@@ -13,18 +10,15 @@ import {
  * Maps each settings section to an icon + label.
  */
 const iconMap = {
-  'camera-feeds':       Camera,
-  'analytics-engine':   Cpu,
-  'nanodb-config':      Database,
-  'security-access':    Shield,
-  'alert-rules':        Bell,
-  'storage-management': HardDrive,
-  'user-management':    Users,
+  'camera-feeds':    Camera,
+  'analytics-engine': SlidersHorizontal,
+  'chromadb-status': Database,
+  'alert-rules':     Bell,
 }
 
-export default function SettingsSidebar({ items, active, onSelect }) {
+export default function SettingsSidebar({ items, active, onSelect, compact = false }) {
   return (
-    <nav style={styles.nav}>
+    <nav style={compact ? styles.navCompact : styles.nav}>
       {items.map((item) => {
         const Icon = iconMap[item.id] || Camera
         const isActive = active === item.id
@@ -32,9 +26,10 @@ export default function SettingsSidebar({ items, active, onSelect }) {
         return (
           <button
             key={item.id}
+            type="button"
             onClick={() => onSelect(item.id)}
             style={{
-              ...styles.item,
+              ...(compact ? styles.itemCompact : styles.item),
               backgroundColor: isActive ? '#090a0a' : 'transparent',
               border: isActive ? '1px solid #171717' : '1px solid transparent',
             }}
@@ -65,24 +60,46 @@ const styles = {
   nav: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '2px',
-    padding: '8px',
-    width: '216px',
+    gap: '4px',
+    padding: '12px 10px',
+    width: '248px',
     flexShrink: 0,
     borderRight: '1px solid #141414',
     overflowY: 'auto',
+  },
+  navCompact: {
+    display: 'flex',
+    gap: '8px',
+    padding: '12px',
+    width: '100%',
+    flexShrink: 0,
+    borderBottom: '1px solid #141414',
+    overflowX: 'auto',
   },
   item: {
     display: 'flex',
     alignItems: 'center',
     gap: '10px',
-    height: '45px',
+    minHeight: '46px',
     padding: '0 12px',
     borderRadius: '4px',
     cursor: 'pointer',
     transition: 'all 0.12s',
     textAlign: 'left',
     width: '100%',
+  },
+  itemCompact: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    minHeight: '44px',
+    padding: '0 14px',
+    borderRadius: '6px',
+    cursor: 'pointer',
+    transition: 'all 0.12s',
+    textAlign: 'left',
+    minWidth: '180px',
+    flexShrink: 0,
   },
   label: {
     fontSize: '12px',

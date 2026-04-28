@@ -7,8 +7,9 @@ import { Camera, Trash2 } from 'lucide-react'
  * Shows: thumbnail placeholder, name, RTSP URL, location tag, feature tags, Configure + Remove buttons.
  */
 export default function CameraConfigRow({ camera, onConfigure, onRemove }) {
-  const { label, name, location, sourceUrl, rtsp, features = [], active } = camera
+  const { label, name, location, sourceUrl, rtsp, features = [], targetModel } = camera
   const displayUrl = sourceUrl || rtsp || ''
+  const tags = features.length > 0 ? features : buildFeatureTags({ targetModel })
 
   return (
     <div style={styles.row}>
@@ -21,26 +22,26 @@ export default function CameraConfigRow({ camera, onConfigure, onRemove }) {
       <div style={styles.info}>
         <div style={styles.nameRow}>
           <span style={styles.camName}>{label || name}</span>
-          <div style={styles.statusBadge}>
-            <span style={styles.statusDot} />
-            <span style={styles.statusText}>ACTIVE</span>
-          </div>
+          {location && (
+            <span style={styles.locationTag}>{location}</span>
+          )}
         </div>
         <span style={styles.rtsp}>{displayUrl}</span>
       </div>
 
       {/* Location + feature tags */}
       <div style={styles.tags}>
-        {location && (
-          <span style={styles.locationTag}>{location}</span>
-        )}
-        {features.map((f) => (
+        {tags.map((f) => (
           <Tag key={f}>{f}</Tag>
         ))}
       </div>
 
       {/* Configure + Remove buttons */}
       <div style={styles.actions}>
+        <div style={styles.statusBadge}>
+          <span style={styles.statusDot} />
+          <span style={styles.statusText}>ACTIVE</span>
+        </div>
         <Button variant="secondary" size="sm" onClick={onConfigure}>Configure</Button>
         <button onClick={onRemove} style={styles.removeBtn} title="Remove camera">
           <Trash2 size={13} color="#4a4a4a" strokeWidth={1.5} />
@@ -50,13 +51,27 @@ export default function CameraConfigRow({ camera, onConfigure, onRemove }) {
   )
 }
 
+function buildFeatureTags({ targetModel }) {
+  const tags = []
+
+  if (targetModel === 'both' || targetModel === 'person' || !targetModel) {
+    tags.push('PERSON DETECTION')
+  }
+  if (targetModel === 'both' || targetModel === 'phone') {
+    tags.push('PHONE DETECTION')
+  }
+
+  return tags
+}
+
 const styles = {
   row: {
     display: 'flex',
     alignItems: 'center',
+    flexWrap: 'wrap',
     gap: '14px',
-    height: '72px',
-    padding: '0 16px',
+    minHeight: '72px',
+    padding: '14px 16px',
     backgroundColor: '#090909',
     border: '1px solid #141414',
     borderRadius: '4px',
@@ -76,13 +91,14 @@ const styles = {
   info: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '3px',
+    gap: '5px',
     minWidth: '140px',
-    flexShrink: 0,
+    flex: '1 1 180px',
   },
   nameRow: {
     display: 'flex',
     alignItems: 'center',
+    flexWrap: 'wrap',
     gap: '8px',
   },
   camName: {
@@ -95,14 +111,15 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     gap: '4px',
+    minWidth: '54px',
   },
   statusDot: {
     display: 'inline-block',
     width: '6px',
     height: '6px',
     borderRadius: '50%',
-    backgroundColor: '#d52521',
-    boxShadow: '0 0 4px rgba(213,37,33,0.5)',
+    backgroundColor: '#3dc45f',
+    boxShadow: '0 0 4px rgba(61,196,95,0.45)',
   },
   statusText: {
     fontSize: '9px',
@@ -124,8 +141,9 @@ const styles = {
   actions: {
     display: 'flex',
     alignItems: 'center',
-    gap: '6px',
-    flexShrink: 0,
+    flexWrap: 'wrap',
+    gap: '10px',
+    marginLeft: 'auto',
   },
   removeBtn: {
     display: 'flex',
@@ -144,8 +162,8 @@ const styles = {
     padding: '3px 7px',
     borderRadius: '3px',
     fontSize: '9px',
-    backgroundColor: '#262525',
-    color: '#5e5f5e',
+    backgroundColor: '#1e1e1e',
+    color: '#6a6b69',
     border: '1px solid #141414',
     letterSpacing: '0.04em',
     fontWeight: 400,

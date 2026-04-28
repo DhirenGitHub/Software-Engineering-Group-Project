@@ -1,12 +1,33 @@
-import { useState, useEffect, useRef } from 'react'
-import { X, Wifi, WifiOff } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Wifi, WifiOff, X } from 'lucide-react'
 import Button from '../ui/Button'
 import StatusDot from '../ui/StatusDot'
+import { DETECTION_SERVER } from '../../lib/detectionServer'
 
-const DETECTION_SERVER = 'http://localhost:5000'
-const BACKEND_REGISTERED_SOURCE_TYPES = new Set(['ai_backend', 'device', 'file'])
+const BACKEND_REGISTERED_SOURCE_TYPES = new Set(['rtsp', 'mjpeg_http', 'file', 'device'])
 
-function getDefaultTargetModel(sourceType) {
+const SOURCE_TYPES = [
+  { value: 'rtsp', label: 'RTSP Stream', description: 'Backend-proxied IP camera stream' },
+  { value: 'mjpeg_http', label: 'MJPEG HTTP', description: 'HTTP camera stream with backend detection' },
+  { value: 'file', label: 'Video File', description: 'Absolute Windows path or hosted .mp4 for testing' },
+  { value: 'device', label: 'Webcam', description: 'Browser webcam piped into the backend detector' },
+]
+
+const URL_PLACEHOLDERS = {
+  rtsp: 'rtsp://192.168.1.101/stream1',
+  mjpeg_http: 'http://192.168.1.101/video',
+  file: 'C:\\Users\\ASUS Vivobook\\OneDrive\\Desktop\\Software-Engineering-Group-Project\\videos\\sample.mp4',
+  device: 'Leave blank for default webcam',
+}
+
+const URL_HINTS = {
+  rtsp: 'The backend will open the RTSP stream and expose an annotated MJPEG feed to the dashboard.',
+  mjpeg_http: 'Use the raw MJPEG camera URL. The backend will wrap it with live detection overlays.',
+  file: 'Local video files are ideal for testing. Absolute Windows paths work here.',
+  device: 'The browser will ask for camera permission. You can optionally paste a specific deviceId.',
+}
+
+function getDefaultTargetModel() {
   return 'person'
 }
 
@@ -14,201 +35,189 @@ function buildEmptyForm() {
   return {
     name: '',
     location: '',
-    sourceType: 'mjpeg_http',
+    sourceType: 'file',
     sourceUrl: '',
-    targetModel: getDefaultTargetModel('mjpeg_http'),
+    targetModel: getDefaultTargetModel(),
     features: [],
   }
 }
 
-function resolveTargetModel(nextSourceType, previousSourceType, currentTargetModel) {
-  if (!currentTargetModel || currentTargetModel === getDefaultTargetModel(previousSourceType)) {
-    return getDefaultTargetModel(nextSourceType)
-  }
-
-  return currentTargetModel
-}
-
-
-const SOURCE_TYPES = [
-  { value: 'rtsp',       label: 'RTSP',        description: 'Real IP camera stream' },
-  { value: 'mjpeg_http', label: 'MJPEG HTTP',  description: 'MJPEG over HTTP — direct stream URL' },
-  { value: 'hls',        label: 'HLS',          description: 'HLS .m3u8 adaptive stream' },
-  { value: 'webrtc',     label: 'WebRTC',       description: 'Ultra low-latency WebRTC feed' },
-  { value: 'file',       label: 'Video File',   description: 'Local video file (loops — good for testing)' },
-  { value: 'ai_backend', label: 'AI Backend Video', description: 'Local C:\\ path or online URL (Auto-starts Python AI)' },
-  { value: 'device',     label: 'Webcam',       description: 'Browser webcam via MediaDevices API' },
-]
-
-const URL_PLACEHOLDERS = {
-  rtsp:       'rtsp://192.168.1.101/stream1',
-  mjpeg_http: 'http://192.168.1.101/mjpeg',
-  hls:        'http://192.168.1.101/stream/index.m3u8',
-  webrtc:     'wss://your-signaling-server/room/cam01',
-  file:       'http://localhost:5173/sample.mp4',
-  ai_backend: 'C:\\Users\\...\\Video.mp4 or http://.../vid.mp4',
-  device:     '',
-}
-
-const URL_HINTS = {
-  rtsp:       'RTSP streams require a server-side proxy — the browser cannot connect directly.',
-  mjpeg_http: 'MJPEG streams load as a plain <img> tag — no extra processing needed.',
-  hls:        'HLS streams are played via hls.js. Ensure CORS headers are set on the server.',
-  webrtc:     'Provide the WebRTC signaling server URL.',
-  file:       'Serve the file from a local HTTP server or use a public URL. The video will loop.',
-  ai_backend: 'Enter a local C:\\ path or online .mp4 link. React will automatically tell the Python AI server to process it!',
-  device:     'The browser will prompt for camera permission. Leave URL blank to use the default webcam, or enter a deviceId.',
-}
-
 const EMPTY_FORM = buildEmptyForm()
 
-/**
- * AddCameraModal — slide-in right panel / centered modal for adding or editing a camera.
- * Props:
- *   open       — boolean
- *   onClose    — () => void
- *   onSave     — (CameraConfig) => void
- *   initial    — CameraConfig | null  (populate for edit mode)
- */
 export default function AddCameraModal({ open, onClose, onSave, initial = null }) {
   const [form, setForm] = useState(EMPTY_FORM)
-  const [testState, setTestState] = useState('idle') // 'idle' | 'testing' | 'ok' | 'fail'
+  const [testState, setTestState] = useState('idle')
+  const [testMessage, setTestMessage] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const overlayRef = useRef(null)
 
-  // Reset / populate form when modal opens
-  useEffect(() => {
-    if (open) {
-      if (initial) {
-        setForm({
-          ...initial,
-          sourceType: initial.rawSourceType || initial.sourceType,
-          sourceUrl: initial.rawUrl !== undefined ? initial.rawUrl : initial.sourceUrl,
-          targetModel: initial.targetModel || getDefaultTargetModel(initial.rawSourceType || initial.sourceType),
-        })
-      } else {
-        setForm(buildEmptyForm())
-      }
-      setTestState('idle')
-    }
-  }, [open, initial])
-
-  // Close on Escape
   useEffect(() => {
     if (!open) return
-    const handler = (e) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
+
+    if (initial) {
+      const initialSourceType = SOURCE_TYPES.some((item) => item.value === (initial.rawSourceType || initial.sourceType))
+        ? (initial.rawSourceType || initial.sourceType)
+        : 'file'
+
+      setForm({
+        ...initial,
+        sourceType: initialSourceType,
+        sourceUrl: initial.rawUrl !== undefined ? initial.rawUrl : initial.sourceUrl,
+        targetModel: initial.targetModel || getDefaultTargetModel(),
+      })
+    } else {
+      setForm(buildEmptyForm())
+    }
+
+    setTestState('idle')
+    setTestMessage('')
+    setIsSaving(false)
+  }, [open, initial])
+
+  useEffect(() => {
+    if (!open) return undefined
+
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') onClose()
+    }
+
+    window.addEventListener('keydown', handleEscape)
+    return () => window.removeEventListener('keydown', handleEscape)
   }, [open, onClose])
 
   if (!open) return null
 
-  const set = (field, value) => setForm((f) => ({ ...f, [field]: value }))
+  const setField = (field, value) => setForm((current) => ({ ...current, [field]: value }))
+  const isEdit = Boolean(initial)
 
   const handleSave = async () => {
     if (!form.name.trim()) return
+
     setIsSaving(true)
-    let finalForm = { ...form, name: form.name.trim(), location: form.location.trim() }
-    const shouldRegisterBackend = BACKEND_REGISTERED_SOURCE_TYPES.has(finalForm.sourceType)
-    const selectedModel = finalForm.targetModel || getDefaultTargetModel(finalForm.sourceType)
+    setTestMessage('')
 
-    if (shouldRegisterBackend) {
-      try {
-        // If editing, attempt to delete old backend stream first to free up the webcam
-        if (initial && initial.backendId) {
-          try {
-            await fetch(`${DETECTION_SERVER}/cameras/${initial.backendId}`, { method: 'DELETE' })
-          } catch (e) { /* ignore fail */ }
-        }
-        const camId = initial?.backendId || `CAM_${finalForm.name.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}_${Math.floor(Math.random()*1000)}`
-        let backendSource = finalForm.sourceUrl
-        if (finalForm.sourceType === 'device') {
-            backendSource = "push";
-        }
-
-        const res = await fetch(`${DETECTION_SERVER}/cameras`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: camId, source: backendSource, model: selectedModel })
-        })
-        if (res.ok) {
-          const data = await res.json()
-          finalForm.sourceType = 'mjpeg_http'
-          finalForm.sourceUrl = data.stream
-          finalForm.rawSourceType = form.sourceType
-          finalForm.rawUrl = form.sourceUrl
-          finalForm.backendId = camId
-          finalForm.targetModel = selectedModel
-        } else {
-          alert("Failed to register with AI backend. Is the Python server running?")
-          setIsSaving(false)
-          return
-        }
-      } catch (err) {
-        console.error(err)
-        alert("Error connecting to AI backend. Ensure 'python server/app.py' is running.")
-        setIsSaving(false)
-        return
-      }
+    let finalForm = {
+      ...form,
+      name: form.name.trim(),
+      location: form.location.trim(),
+      sourceUrl: form.sourceUrl.trim(),
     }
 
-    onSave(finalForm)
-    setIsSaving(false)
-    onClose()
+    try {
+      if (BACKEND_REGISTERED_SOURCE_TYPES.has(finalForm.sourceType)) {
+        if (initial?.backendId) {
+          await fetch(`${DETECTION_SERVER}/cameras/${initial.backendId}`, { method: 'DELETE' }).catch(() => {})
+        }
+
+        const backendId = initial?.backendId || buildCameraId(finalForm.name)
+        const backendSource = finalForm.sourceType === 'device'
+          ? 'push'
+          : finalForm.sourceUrl
+
+        const response = await fetch(`${DETECTION_SERVER}/cameras`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: backendId,
+            source: backendSource,
+            model: finalForm.targetModel || getDefaultTargetModel(),
+          }),
+        })
+
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Unable to register this source with the detection backend.')
+        }
+
+        finalForm = {
+          ...finalForm,
+          sourceType: 'mjpeg_http',
+          sourceUrl: payload.stream,
+          rawSourceType: form.sourceType,
+          rawUrl: form.sourceUrl.trim(),
+          backendId,
+        }
+      }
+
+      onSave(finalForm)
+      onClose()
+    } catch (error) {
+      setTestState('fail')
+      setTestMessage(error.message || 'Unable to save this camera.')
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   const handleTest = async () => {
     setTestState('testing')
-    // Simulate a connection test (real integration would ping the URL)
-    await new Promise((r) => setTimeout(r, 1200))
-    if (form.sourceType === 'device') {
+    setTestMessage('')
+
+    try {
+      if (form.sourceType === 'device') {
+        await testDeviceSource(form.sourceUrl.trim())
+        setTestState('ok')
+        setTestMessage('Webcam permission granted and a live stream is available.')
+        return
+      }
+
+      if (!form.sourceUrl.trim()) {
+        throw new Error('Enter a stream URL or video path first.')
+      }
+
+      const hasFrames = await testBackendSource({
+        sourceType: form.sourceType,
+        sourceUrl: form.sourceUrl.trim(),
+        targetModel: form.targetModel || getDefaultTargetModel(),
+      })
+
+      if (!hasFrames) {
+        throw new Error('The backend registered the source but did not receive frames in time.')
+      }
+
       setTestState('ok')
-    } else {
-      setTestState(form.sourceUrl ? 'ok' : 'fail')
+      setTestMessage('Backend received frames successfully.')
+    } catch (error) {
+      setTestState('fail')
+      setTestMessage(error.message || 'Connection test failed.')
     }
   }
 
-  const isEdit = !!initial
-
   return (
     <>
-      {/* Backdrop */}
       <div
         ref={overlayRef}
-        onClick={(e) => { if (e.target === overlayRef.current) onClose() }}
+        onClick={(event) => {
+          if (event.target === overlayRef.current) onClose()
+        }}
         style={styles.backdrop}
       />
 
-      {/* Modal panel */}
       <div style={styles.modal}>
-        {/* Header */}
         <div style={styles.header}>
           <div style={styles.headerLeft}>
-            <span style={styles.title}>
-              {isEdit ? `Configure ${initial.name}` : 'Add Camera'}
-            </span>
+            <span style={styles.title}>{isEdit ? `Configure ${initial.name}` : 'Add Camera'}</span>
             {isEdit && (
               <div style={styles.subtitle}>
-                <span style={styles.subtitleText}>{initial.location} · </span>
-                <StatusDot online={initial.active} size={7} />
-                <span style={styles.subtitleText}> ACTIVE</span>
+                <span style={styles.subtitleText}>{initial.location || 'Configured feed'}</span>
+                <StatusDot online size={7} />
+                <span style={styles.subtitleText}>ACTIVE</span>
               </div>
             )}
           </div>
-          <button onClick={onClose} style={styles.closeBtn}>
+          <button onClick={onClose} style={styles.closeBtn} type="button">
             <X size={16} color="#636463" strokeWidth={1.5} />
           </button>
         </div>
 
         <div style={styles.divider} />
 
-        {/* Form body */}
         <div style={styles.body}>
           <Field label="Camera name">
             <input
               style={styles.input}
               value={form.name}
-              onChange={(e) => set('name', e.target.value)}
+              onChange={(event) => setField('name', event.target.value)}
               placeholder="CAM 01"
             />
           </Field>
@@ -217,98 +226,81 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
             <input
               style={styles.input}
               value={form.location}
-              onChange={(e) => set('location', e.target.value)}
+              onChange={(event) => setField('location', event.target.value)}
               placeholder="Entrance"
             />
           </Field>
 
           <Field label="Source type">
-            <div style={styles.selectWrapper}>
-              <select
-                style={styles.select}
-                value={form.sourceType}
-                onChange={(e) => {
-                  const nextSourceType = e.target.value
-                  setForm((current) => ({
-                    ...current,
-                    sourceType: nextSourceType,
-                    sourceUrl: '',
-                    targetModel: resolveTargetModel(nextSourceType, current.sourceType, current.targetModel),
-                  }))
-                }}
-              >
-                {SOURCE_TYPES.map((s) => (
-                  <option key={s.value} value={s.value}>
-                    {s.label} — {s.description}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <select
+              style={styles.select}
+              value={form.sourceType}
+              onChange={(event) => {
+                const nextSourceType = event.target.value
+                setForm((current) => ({
+                  ...current,
+                  sourceType: nextSourceType,
+                  sourceUrl: '',
+                  targetModel: current.targetModel || getDefaultTargetModel(),
+                }))
+                setTestState('idle')
+                setTestMessage('')
+              }}
+            >
+              {SOURCE_TYPES.map((sourceType) => (
+                <option key={sourceType.value} value={sourceType.value}>
+                  {sourceType.label} - {sourceType.description}
+                </option>
+              ))}
+            </select>
           </Field>
 
-          <Field label="Detection Model">
-            <div style={styles.selectWrapper}>
-              <select
-                style={styles.select}
-                value={form.targetModel || getDefaultTargetModel(form.sourceType)}
-                onChange={(e) => set('targetModel', e.target.value)}
-              >
-                <option value="person">Person Detection</option>
-                <option value="both">Person & Phone Detection</option>
-                <option value="phone">Phone Detection</option>
-              </select>
-            </div>
+          <Field label="Detection model">
+            <select
+              style={styles.select}
+              value={form.targetModel || getDefaultTargetModel()}
+              onChange={(event) => setField('targetModel', event.target.value)}
+            >
+              <option value="person">Person Detection</option>
+              <option value="both">Person & Phone Detection</option>
+              <option value="phone">Phone Detection</option>
+            </select>
           </Field>
 
-          {form.sourceType !== 'device' && (
-            <Field label="Stream URL">
-              <input
-                style={styles.input}
-                value={form.sourceUrl}
-                onChange={(e) => set('sourceUrl', e.target.value)}
-                placeholder={URL_PLACEHOLDERS[form.sourceType]}
-                spellCheck={false}
-              />
-              <span style={styles.hint}>{URL_HINTS[form.sourceType]}</span>
-            </Field>
-          )}
-
-          {form.sourceType === 'device' && (
-            <Field label="Device ID (optional)">
-              <input
-                style={styles.input}
-                value={form.sourceUrl}
-                onChange={(e) => set('sourceUrl', e.target.value)}
-                placeholder="Leave blank for default webcam"
-              />
-              <span style={styles.hint}>{URL_HINTS.device}</span>
-            </Field>
-          )}
-
+          <Field label={form.sourceType === 'device' ? 'Device ID (optional)' : 'Stream URL / video path'}>
+            <input
+              style={styles.input}
+              value={form.sourceUrl}
+              onChange={(event) => setField('sourceUrl', event.target.value)}
+              placeholder={URL_PLACEHOLDERS[form.sourceType]}
+              spellCheck={false}
+            />
+            <span style={styles.hint}>{URL_HINTS[form.sourceType]}</span>
+          </Field>
         </div>
 
-        {/* Footer */}
         <div style={styles.footer}>
-          <Button variant="secondary" size="sm" onClick={handleTest} style={{ gap: '6px' }}>
-            {testState === 'testing' ? (
-              <span style={{ fontSize: '10px' }}>Testing…</span>
-            ) : testState === 'ok' ? (
-              <><Wifi size={12} color="#38b45a" /><span>Connected</span></>
+          <div style={styles.footerStatus}>
+            {testState === 'ok' ? (
+              <span style={styles.statusSuccess}><Wifi size={12} color="#38b45a" /> Connected</span>
             ) : testState === 'fail' ? (
-              <><WifiOff size={12} color="#d52521" /><span>Failed</span></>
+              <span style={styles.statusFail}><WifiOff size={12} color="#d52521" /> Failed</span>
+            ) : testState === 'testing' ? (
+              <span style={styles.statusNeutral}>Testing source...</span>
             ) : (
-              'Test connection'
+              <span style={styles.statusNeutral}>Run a live connection test before saving.</span>
             )}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={handleSave}
-            style={{ opacity: form.name.trim() && !isSaving ? 1 : 0.4 }}
-            disabled={isSaving}
-          >
-            {isSaving ? 'Processing...' : 'Save'}
-          </Button>
+            {testMessage && <span style={styles.footerHint}>{testMessage}</span>}
+          </div>
+
+          <div style={styles.footerActions}>
+            <Button variant="secondary" size="sm" onClick={handleTest} disabled={testState === 'testing' || isSaving}>
+              Test Connection
+            </Button>
+            <Button variant="primary" size="sm" onClick={handleSave} disabled={!form.name.trim() || isSaving}>
+              {isSaving ? 'Processing...' : 'Save'}
+            </Button>
+          </div>
         </div>
       </div>
     </>
@@ -324,6 +316,63 @@ function Field({ label, children }) {
   )
 }
 
+function buildCameraId(name) {
+  const slug = name.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 10) || 'CAM'
+  return `CAM_${slug}_${Math.floor(Math.random() * 1000)}`
+}
+
+async function testDeviceSource(deviceId) {
+  const constraints = {
+    video: deviceId ? { deviceId: { exact: deviceId } } : true,
+    audio: false,
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia(constraints)
+  stream.getTracks().forEach((track) => track.stop())
+}
+
+async function testBackendSource({ sourceType, sourceUrl, targetModel }) {
+  const testId = `TEST_${Date.now()}`
+
+  try {
+    const response = await fetch(`${DETECTION_SERVER}/cameras`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: testId,
+        source: sourceType === 'device' ? 'push' : sourceUrl,
+        model: targetModel,
+      }),
+    })
+
+    const payload = await response.json().catch(() => null)
+    if (!response.ok) {
+      throw new Error(payload?.error || 'The backend rejected this source.')
+    }
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await sleep(600)
+      const debugResponse = await fetch(`${DETECTION_SERVER}/debug/${testId}`)
+      if (!debugResponse.ok) continue
+      const debugPayload = await debugResponse.json()
+      if (debugPayload?.current_stats?.has_frame) {
+        return true
+      }
+      if (debugPayload?.detector_running === false) {
+        return false
+      }
+    }
+
+    return false
+  } finally {
+    await fetch(`${DETECTION_SERVER}/cameras/${testId}`, { method: 'DELETE' }).catch(() => {})
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
 const styles = {
   backdrop: {
     position: 'fixed',
@@ -336,9 +385,9 @@ const styles = {
     top: '50%',
     left: '50%',
     transform: 'translate(-50%, -50%)',
-    width: '500px',
+    width: '520px',
     maxHeight: '90vh',
-    backgroundColor: '#1c1c1c',
+    backgroundColor: '#151515',
     border: '1px solid #2a2a2a',
     borderRadius: '8px',
     zIndex: 101,
@@ -412,26 +461,22 @@ const styles = {
     textTransform: 'uppercase',
   },
   input: {
-    backgroundColor: '#131314',
+    backgroundColor: '#101011',
     border: '1px solid #2a2a2a',
     borderRadius: '5px',
-    padding: '9px 12px',
+    padding: '10px 12px',
     fontSize: '12px',
     color: '#9fa09e',
     fontFamily: 'Inter, sans-serif',
     outline: 'none',
     width: '100%',
-    transition: 'border-color 0.15s',
-  },
-  selectWrapper: {
-    position: 'relative',
   },
   select: {
     width: '100%',
-    backgroundColor: '#131314',
+    backgroundColor: '#101011',
     border: '1px solid #2a2a2a',
     borderRadius: '5px',
-    padding: '9px 12px',
+    padding: '10px 12px',
     fontSize: '12px',
     color: '#9fa09e',
     fontFamily: 'Inter, sans-serif',
@@ -440,18 +485,56 @@ const styles = {
     appearance: 'auto',
   },
   hint: {
-    fontSize: '9px',
-    color: '#3c3d3c',
+    fontSize: '10px',
+    color: '#535553',
     lineHeight: 1.5,
-    marginTop: '2px',
   },
   footer: {
     display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: '8px',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    gap: '14px',
     padding: '12px 20px',
     borderTop: '1px solid #252525',
+    flexShrink: 0,
+  },
+  footerStatus: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '5px',
+    minWidth: 0,
+    flex: 1,
+  },
+  footerHint: {
+    fontSize: '10px',
+    color: '#737573',
+    lineHeight: 1.5,
+  },
+  statusSuccess: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '11px',
+    color: '#59c878',
+    fontWeight: 700,
+  },
+  statusFail: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '11px',
+    color: '#df5f58',
+    fontWeight: 700,
+  },
+  statusNeutral: {
+    fontSize: '11px',
+    color: '#8a8c8a',
+    fontWeight: 700,
+  },
+  footerActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
     flexShrink: 0,
   },
 }

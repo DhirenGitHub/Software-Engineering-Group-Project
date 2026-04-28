@@ -3,7 +3,7 @@
  * variant: 'primary' | 'secondary' | 'ghost'
  * size: 'sm' | 'md'
  */
-export default function Button({ children, variant = 'secondary', size = 'md', onClick, style = {} }) {
+export default function Button({ children, variant = 'secondary', size = 'md', onClick, style = {}, disabled = false, type = 'button' }) {
   const base = {
     display: 'inline-flex',
     alignItems: 'center',
@@ -42,10 +42,22 @@ export default function Button({ children, variant = 'secondary', size = 'md', o
 
   return (
     <button
+      type={type}
       onClick={onClick}
-      style={{ ...base, ...variants[variant], ...sizes[size], ...style }}
-      onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.8')}
-      onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
+      disabled={disabled}
+      style={{
+        ...base,
+        ...variants[variant],
+        ...sizes[size],
+        ...(disabled ? { opacity: 0.45, cursor: 'default' } : null),
+        ...style,
+      }}
+      onMouseEnter={(e) => {
+        if (!disabled) e.currentTarget.style.opacity = '0.8'
+      }}
+      onMouseLeave={(e) => {
+        if (!disabled) e.currentTarget.style.opacity = '1'
+      }}
     >
       {children}
     </button>

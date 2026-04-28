@@ -1,53 +1,126 @@
 import { useState } from 'react'
-import { Search } from 'lucide-react'
+import { Loader2, Search } from 'lucide-react'
+import { DETECTION_SERVER } from '../../lib/detectionServer'
+import useSearchStatus from '../../hooks/useSearchStatus'
 
-const DETECTION_SERVER = 'http://localhost:5000'
-
-/**
- * SearchPanel — CLIP-powered natural language search over indexed person crops.
- * Sits in the right sidebar below ZoneAnalytics.
- */
-export default function SearchPanel() {
-  const [query, setQuery]     = useState('')
+export default function SearchPanel({ variant = 'sidebar' }) {
+  const [query, setQuery] = useState('')
   const [results, setResults] = useState([])
-  const [status, setStatus]   = useState('idle') // idle | loading | done | error
+  const [status, setStatus] = useState('idle')
+  const [errorMessage, setErrorMessage] = useState('')
+  const { data: searchData, status: searchStatus } = useSearchStatus()
+  const hasIndexError = Boolean(searchData?.error)
 
   const handleSearch = async () => {
-    const q = query.trim()
-    if (!q) return
+    const trimmedQuery = query.trim()
+    if (!trimmedQuery) return
+
     setStatus('loading')
     setResults([])
+    setErrorMessage('')
+
     try {
-      const res  = await fetch(`${DETECTION_SERVER}/search`, {
-        method:  'POST',
+      const response = await fetch(`${DETECTION_SERVER}/search`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ query: q }),
+        body: JSON.stringify({ query: trimmedQuery }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'search failed')
-      setResults(data)
+
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.detail || payload?.error || 'Smart search failed')
+      }
+
+      setResults(Array.isArray(payload) ? payload : [])
       setStatus('done')
-    } catch {
+    } catch (error) {
       setStatus('error')
+      setErrorMessage(error.message || 'Smart search is unavailable right now.')
     }
   }
 
-  const handleKeyDown = (e) => { if (e.key === 'Enter') handleSearch() }
+  const handleKeyDown = (event) => {
+    if (event.key === 'Enter') {
+      handleSearch()
+    }
+  }
+
+  if (variant === 'tile') {
+    return (
+      <div style={tile.panel}>
+        <div style={tile.inputRow}>
+          <Search size={17} color="#b8b8b8" strokeWidth={1.8} />
+          <input
+            style={tile.input}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Find people, phones, or scenes in indexed footage..."
+          />
+          <button onClick={handleSearch} style={tile.actionButton} type="button" disabled={status === 'loading'}>
+            {status === 'loading' ? <Loader2 size={16} color="#d5d5d5" strokeWidth={1.8} /> : <Search size={16} color="#d5d5d5" strokeWidth={1.8} />}
+          </button>
+        </div>
+
+        <div style={tile.hero}>
+          <div style={tile.heroCircle}>
+            <Search size={24} color="#d0d0d0" strokeWidth={1.7} />
+          </div>
+          <span style={tile.heroTitle}>CHROMADB SMART SEARCH</span>
+          <span style={tile.heroText}>
+            Query indexed detections with natural language and jump back into the right moment faster.
+          </span>
+          <div style={tile.heroMeta}>
+            <span
+              style={
+                hasIndexError
+                  ? tile.metaChipError
+                  : searchStatus === 'live' && searchData?.ready
+                    ? tile.metaChipReady
+                    : tile.metaChipStandby
+              }
+            >
+              {hasIndexError ? 'INDEX ERROR' : searchStatus === 'live' && searchData?.ready ? 'INDEX READY' : 'INDEX STANDBY'}
+            </span>
+            <span style={tile.metaChipNeutral}>
+              {searchStatus === 'live' ? `${searchData?.indexed_items || 0} indexed items` : 'Backend offline'}
+            </span>
+          </div>
+        </div>
+
+        {hasIndexError && (
+          <div style={tile.inlineMessageError}>{searchData.error}</div>
+        )}
+
+        {status === 'error' && (
+          <div style={tile.inlineMessageError}>{errorMessage}</div>
+        )}
+        {status === 'done' && results.length === 0 && (
+          <div style={tile.inlineMessage}>No matches found for that query yet.</div>
+        )}
+        {results.length > 0 && (
+          <div style={tile.results}>
+            {results.slice(0, 4).map((result, index) => (
+              <ResultCard key={`${result.image_file || 'match'}-${index}`} result={result} rank={index + 1} />
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
-    <div style={styles.panel}>
-      {/* Header */}
-      <div style={styles.header}>
+    <div style={sidebar.panel}>
+      <div style={sidebar.header}>
         <Search size={12} color="#626261" strokeWidth={1.5} />
-        <span style={styles.headerTitle}>SMART SEARCH</span>
+        <span style={sidebar.headerTitle}>SMART SEARCH</span>
       </div>
 
-      {/* Input row */}
-      <div style={styles.inputRow}>
+      <div style={sidebar.inputRow}>
         <input
-          style={styles.input}
+          style={sidebar.input}
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(event) => setQuery(event.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="e.g. person in blue shirt"
         />
@@ -55,24 +128,24 @@ export default function SearchPanel() {
           onClick={handleSearch}
           disabled={status === 'loading'}
           style={status === 'loading'
-            ? { ...styles.searchBtn, ...styles.searchBtnDisabled }
-            : styles.searchBtn}
+            ? { ...sidebar.searchBtn, ...sidebar.searchBtnDisabled }
+            : sidebar.searchBtn}
+          type="button"
         >
-          {status === 'loading' ? '…' : 'GO'}
+          {status === 'loading' ? '...' : 'GO'}
         </button>
       </div>
 
-      {/* Status / results */}
       {status === 'error' && (
-        <span style={styles.errorText}>Search unavailable — is CLIP loaded?</span>
+        <span style={sidebar.errorText}>{errorMessage}</span>
       )}
       {status === 'done' && results.length === 0 && (
-        <span style={styles.emptyText}>No matches found.</span>
+        <span style={sidebar.emptyText}>No matches found yet.</span>
       )}
       {results.length > 0 && (
-        <div style={styles.results}>
-          {results.map((r, i) => (
-            <ResultRow key={i} result={r} rank={i + 1} />
+        <div style={sidebar.results}>
+          {results.map((result, index) => (
+            <ResultRow key={`${result.image_file || 'match'}-${index}`} result={result} rank={index + 1} />
           ))}
         </div>
       )}
@@ -80,55 +153,94 @@ export default function SearchPanel() {
   )
 }
 
-function ResultRow({ result, rank }) {
-
-  const formatTime = (unixSeconds) => {
-    if (!unixSeconds) return '--:--:--'
-
-
-    const date = new Date(unixSeconds * 1000)
-
-
-    return date.toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
-    })
-  }
-
-  // 2. Clean up the long C:/ file path to just show the filename
-  let cleanCamId = result.cam_id ? result.cam_id.split(/[/\\]/).pop() : 'LIVE FEED'
-  // Truncate if it's still too long to fit nicely
-  if (cleanCamId.length > 22) cleanCamId = cleanCamId.substring(0, 19) + '...'
-
-  // 3. Clean up the score
-  const cleanScore = result.score ? result.score.toFixed(1) : 'N/A'
+function FadeImage({ src, alt, style, onErrorStyle = 'hidden' }) {
+  const [loaded, setLoaded] = useState(false)
 
   return (
-    <div style={styles.resultRow}>
-      <img
+    <img
+      src={src}
+      alt={alt}
+      style={{
+        ...style,
+        opacity: loaded ? 1 : 0,
+        transition: 'opacity 0.25s ease-in',
+      }}
+      onLoad={() => setLoaded(true)}
+      onError={(event) => {
+        if (onErrorStyle === 'hidden') {
+          event.currentTarget.style.visibility = 'hidden'
+        } else {
+          event.currentTarget.style.display = 'none'
+        }
+      }}
+    />
+  )
+}
+
+function ResultCard({ result, rank }) {
+  return (
+    <div style={tile.resultCard}>
+      <FadeImage
         src={result.image_url}
         alt={`Match ${rank}`}
-        style={styles.thumb}
-        onError={(e) => { e.target.style.display = 'none' }}
+        style={tile.resultThumb}
+        onErrorStyle="hidden"
       />
-      <div style={styles.resultMeta}>
-        <span style={styles.rankText}>#{rank} MATCH</span>
+      <div style={tile.resultMeta}>
+        <span style={tile.resultRank}>#{rank}</span>
+        <span style={tile.resultCam}>{formatCameraLabel(result.cam_id)}</span>
+        <span style={tile.resultTime}>{formatUnixTime(result.timestamp)}</span>
+      </div>
+    </div>
+  )
+}
 
-        <span style={styles.metaText} title={result.cam_id}>
-          {cleanCamId}
+function ResultRow({ result, rank }) {
+  return (
+    <div style={sidebar.resultRow}>
+      <FadeImage
+        src={result.image_url}
+        alt={`Match ${rank}`}
+        style={sidebar.thumb}
+        onErrorStyle="none"
+      />
+      <div style={sidebar.resultMeta}>
+        <span style={sidebar.rankText}>#{rank} MATCH</span>
+        <span style={sidebar.metaText} title={result.cam_id}>
+          {formatCameraLabel(result.cam_id)}
         </span>
-
-        <div style={styles.badgeContainer}>
-          <span style={styles.timeBadge}>⏱️ {formatTime(result.timestamp)}</span>
-          <span style={styles.scoreBadge}>Score: {cleanScore}</span>
+        <div style={sidebar.badgeContainer}>
+          <span style={sidebar.timeBadge}>{formatUnixTime(result.timestamp)}</span>
+          <span style={sidebar.scoreBadge}>Score: {formatScore(result.score)}</span>
         </div>
       </div>
     </div>
   )
 }
 
-const styles = {
+function formatUnixTime(unixSeconds) {
+  if (!unixSeconds) return '--:--:--'
+
+  return new Date(unixSeconds * 1000).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function formatCameraLabel(camId) {
+  let cleanCamId = camId ? camId.split(/[/\\]/).pop() : 'LIVE FEED'
+  if (cleanCamId.length > 22) {
+    cleanCamId = `${cleanCamId.slice(0, 19)}...`
+  }
+  return cleanCamId
+}
+
+function formatScore(score) {
+  return typeof score === 'number' ? score.toFixed(1) : 'N/A'
+}
+
+const sidebar = {
   panel: {
     borderTop: '1px solid #141414',
     padding: '10px 12px',
@@ -182,8 +294,9 @@ const styles = {
   },
   errorText: {
     fontSize: '9px',
-    color: '#6a2020',
+    color: '#9d4c4c',
     letterSpacing: '0.02em',
+    lineHeight: 1.5,
   },
   emptyText: {
     fontSize: '9px',
@@ -252,7 +365,205 @@ const styles = {
   scoreBadge: {
     fontSize: '9px',
     fontWeight: 700,
-    color: '#38b45a', // Dhiren's green accent color
+    color: '#38b45a',
     letterSpacing: '0.02em',
+  },
+}
+
+const tile = {
+  panel: {
+    position: 'relative',
+    width: '100%',
+    height: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '14px',
+    padding: '14px',
+    borderRadius: '12px',
+    border: '1px solid #1c1c1c',
+    background: 'radial-gradient(circle at 50% 35%, rgba(255,255,255,0.08), rgba(9,9,9,0.94) 52%), linear-gradient(180deg, rgba(24,24,24,0.96), rgba(8,8,8,0.98))',
+    overflow: 'hidden',
+  },
+  inputRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    minHeight: '46px',
+    padding: '0 12px',
+    borderRadius: '10px',
+    backgroundColor: 'rgba(36,36,36,0.94)',
+    border: '1px solid #2d2d2d',
+    flexShrink: 0,
+  },
+  input: {
+    flex: 1,
+    backgroundColor: 'transparent',
+    border: 'none',
+    outline: 'none',
+    color: '#d0d0d0',
+    fontSize: '13px',
+    fontFamily: 'Inter, sans-serif',
+  },
+  actionButton: {
+    display: 'grid',
+    placeItems: 'center',
+    width: '36px',
+    height: '36px',
+    borderRadius: '999px',
+    border: '1px solid #383838',
+    backgroundColor: '#181818',
+    cursor: 'pointer',
+    flexShrink: 0,
+  },
+  hero: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '14px',
+    textAlign: 'center',
+    padding: '10px 16px 6px',
+  },
+  heroCircle: {
+    display: 'grid',
+    placeItems: 'center',
+    width: '54px',
+    height: '54px',
+    borderRadius: '999px',
+    backgroundColor: 'rgba(18,18,18,0.9)',
+    border: '1px solid #2b2b2b',
+    boxShadow: '0 12px 24px rgba(0,0,0,0.25)',
+  },
+  heroTitle: {
+    fontSize: '20px',
+    fontWeight: 700,
+    color: '#d0d0ce',
+    letterSpacing: '0.02em',
+  },
+  heroText: {
+    maxWidth: '360px',
+    fontSize: '12px',
+    lineHeight: 1.7,
+    color: '#7a7b79',
+  },
+  heroMeta: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+  },
+  metaChipReady: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '5px 9px',
+    borderRadius: '999px',
+    backgroundColor: '#102214',
+    border: '1px solid #21482c',
+    color: '#77d08d',
+    fontSize: '10px',
+    fontWeight: 700,
+    letterSpacing: '0.06em',
+  },
+  metaChipStandby: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '5px 9px',
+    borderRadius: '999px',
+    backgroundColor: '#1d1a12',
+    border: '1px solid #3f3520',
+    color: '#d2b06b',
+    fontSize: '10px',
+    fontWeight: 700,
+    letterSpacing: '0.06em',
+  },
+  metaChipError: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '5px 9px',
+    borderRadius: '999px',
+    backgroundColor: '#241010',
+    border: '1px solid #5c2020',
+    color: '#ef9088',
+    fontSize: '10px',
+    fontWeight: 700,
+    letterSpacing: '0.06em',
+  },
+  metaChipNeutral: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '5px 9px',
+    borderRadius: '999px',
+    backgroundColor: '#161616',
+    border: '1px solid #292929',
+    color: '#9a9b99',
+    fontSize: '10px',
+    fontWeight: 700,
+  },
+  inlineMessage: {
+    padding: '10px 12px',
+    borderRadius: '8px',
+    border: '1px solid #1d1d1d',
+    backgroundColor: 'rgba(12,12,12,0.9)',
+    color: '#8a8b89',
+    fontSize: '11px',
+  },
+  inlineMessageError: {
+    padding: '10px 12px',
+    borderRadius: '8px',
+    border: '1px solid #4f2020',
+    backgroundColor: 'rgba(26,10,10,0.94)',
+    color: '#f18c85',
+    fontSize: '11px',
+  },
+  results: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: '10px',
+    marginTop: 'auto',
+  },
+  resultCard: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    minWidth: 0,
+    padding: '10px',
+    borderRadius: '10px',
+    backgroundColor: 'rgba(10,10,10,0.9)',
+    border: '1px solid #1d1d1d',
+  },
+  resultThumb: {
+    width: '56px',
+    height: '72px',
+    borderRadius: '6px',
+    objectFit: 'cover',
+    backgroundColor: '#050505',
+    border: '1px solid #202020',
+    flexShrink: 0,
+  },
+  resultMeta: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '5px',
+    minWidth: 0,
+  },
+  resultRank: {
+    fontSize: '10px',
+    fontWeight: 700,
+    color: '#d14539',
+    letterSpacing: '0.06em',
+  },
+  resultCam: {
+    fontSize: '11px',
+    color: '#b3b3b1',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  resultTime: {
+    fontSize: '10px',
+    color: '#6f706e',
+    fontVariantNumeric: 'tabular-nums',
   },
 }

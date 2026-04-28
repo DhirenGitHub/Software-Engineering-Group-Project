@@ -4,7 +4,6 @@ import {
   TriangleAlert,
   BarChart3,
   Settings,
-  User,
 } from 'lucide-react'
 
 /**
@@ -27,12 +26,12 @@ export default function IconNavBar() {
 
   return (
     <nav style={styles.nav}>
-      {/* Icon slots */}
       <div style={styles.icons}>
         {navItems.map(({ icon: Icon, path, tooltip }) => {
           const active = isActive(path)
           return (
             <button
+              type="button"
               key={path}
               title={tooltip}
               onClick={() => navigate(path)}
@@ -48,13 +47,8 @@ export default function IconNavBar() {
                 strokeWidth={active ? 2 : 1.5}
               />
             </button>
-          )
-        })}
-      </div>
-
-      {/* User avatar at bottom */}
-      <div style={styles.avatar}>
-        <User size={18} color="#3a3a3a" strokeWidth={1.5} />
+            )
+          })}
       </div>
     </nav>
   )
@@ -64,17 +58,16 @@ const styles = {
   nav: {
     display: 'flex',
     flexDirection: 'column',
-    justifyContent: 'space-between',
     width: '65px',
     flexShrink: 0,
     backgroundColor: '#080808',
     borderRight: '1px solid #111111',
     height: '100%',
+    paddingTop: '44px',
   },
   icons: {
     display: 'flex',
     flexDirection: 'column',
-    paddingTop: '12px',
   },
   iconBtn: {
     display: 'flex',
@@ -84,15 +77,6 @@ const styles = {
     height: '64px',
     borderRadius: 0,
     transition: 'background-color 0.15s',
-    cursor: 'pointer',
-  },
-  avatar: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: '64px',
-    height: '64px',
-    marginBottom: '8px',
     cursor: 'pointer',
   },
 }

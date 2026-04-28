@@ -1,37 +1,52 @@
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { CheckCheck, Eye, ExternalLink, Filter, Search, Smartphone, TriangleAlert, Users, X } from 'lucide-react'
+import {
+  CheckCheck,
+  ExternalLink,
+  Eye,
+  Filter,
+  Search,
+  Smartphone,
+  TriangleAlert,
+  Users,
+  WifiOff,
+  X,
+} from 'lucide-react'
 import PageLayout from '../components/layout/PageLayout'
 import useLiveAlerts from '../hooks/useLiveAlerts'
 import { useCameras } from '../context/CameraContext'
+import useViewportWidth from '../hooks/useViewportWidth'
 
 const SEVERITY_FILTERS = [
-  { id: 'all', label: 'All Alerts' },
+  { id: 'all', label: 'All Priorities' },
   { id: 'critical', label: 'High Priority' },
   { id: 'warning', label: 'Medium Priority' },
   { id: 'info', label: 'Low Priority' },
 ]
 
 const CATEGORY_FILTERS = ['all', 'Device Misuse', 'Crowd Monitoring', 'Feed Health', 'General']
-const STATUS_FILTERS = ['all', 'open', 'closed']
+const STATUS_FILTERS = ['all', 'open', 'acknowledged', 'resolved']
 
 export default function AlertsPage() {
   const navigate = useNavigate()
+  const viewportWidth = useViewportWidth()
+  const compact = viewportWidth < 1180
+  const narrowCards = viewportWidth < 760
   const { cameras } = useCameras()
   const { alerts, status } = useLiveAlerts()
   const [query, setQuery] = useState('')
   const [severityFilter, setSeverityFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
-  const [statusFilter, setStatusFilter] = useState('open')
+  const [statusFilter, setStatusFilter] = useState('all')
   const [showFilters, setShowFilters] = useState(false)
-  const [closedIds, setClosedIds] = useState([])
+  const [statusOverrides, setStatusOverrides] = useState({})
 
   const alertItems = useMemo(() => (
     alerts.map((alert) => ({
       ...alert,
-      status: closedIds.includes(alert.id) ? 'closed' : (alert.status || 'open'),
+      status: statusOverrides[alert.id] || alert.status || 'open',
     }))
-  ), [closedIds, alerts])
+  ), [alerts, statusOverrides])
 
   const camerasByAlertId = useMemo(() => (
     new Map(cameras.flatMap((camera) => {
@@ -41,57 +56,52 @@ export default function AlertsPage() {
   ), [cameras])
 
   const visibleAlerts = useMemo(() => {
-    const q = query.trim().toLowerCase()
+    const normalizedQuery = query.trim().toLowerCase()
 
     return alertItems.filter((alert) => {
       const matchesSeverity = severityFilter === 'all' ? true : alert.severity === severityFilter
       const matchesCategory = categoryFilter === 'all' ? true : alert.category === categoryFilter
       const matchesStatus = statusFilter === 'all' ? true : alert.status === statusFilter
-      const haystack = [
+      const searchHaystack = [
         alert.id,
         alert.type,
         alert.target,
         alert.cameraId,
         alert.detail,
         alert.category,
-        alert.priorityLabel,
-        alert.kind,
       ].join(' ').toLowerCase()
-      const matchesQuery = q ? haystack.includes(q) : true
+      const matchesQuery = normalizedQuery ? searchHaystack.includes(normalizedQuery) : true
       return matchesSeverity && matchesCategory && matchesStatus && matchesQuery
     })
   }, [alertItems, categoryFilter, query, severityFilter, statusFilter])
 
   const counts = useMemo(() => ({
-    critical: alertItems.filter((alert) => alert.status !== 'closed' && alert.severity === 'critical').length,
-    warning: alertItems.filter((alert) => alert.status !== 'closed' && alert.severity === 'warning').length,
-    info: alertItems.filter((alert) => alert.status !== 'closed' && alert.severity === 'info').length,
-    open: alertItems.filter((alert) => alert.status !== 'closed').length,
+    critical: alertItems.filter((alert) => alert.status !== 'resolved' && alert.severity === 'critical').length,
+    warning: alertItems.filter((alert) => alert.status !== 'resolved' && alert.severity === 'warning').length,
+    info: alertItems.filter((alert) => alert.status !== 'resolved' && alert.severity === 'info').length,
   }), [alertItems])
 
-  const handleAcknowledge = (alertId) => {
-    setClosedIds((current) => (
-      current.includes(alertId) ? current : [...current, alertId]
-    ))
+  const updateAlertStatus = (alertId, nextStatus) => {
+    setStatusOverrides((current) => ({ ...current, [alertId]: nextStatus }))
   }
 
   const clearFilters = () => {
     setQuery('')
     setSeverityFilter('all')
     setCategoryFilter('all')
-    setStatusFilter('open')
+    setStatusFilter('all')
   }
 
   return (
     <PageLayout title="ALERTS & EVENTS">
       <div style={styles.page}>
-        <div style={styles.toolbar}>
-          <div style={styles.searchWrap}>
+        <div style={compact ? styles.toolbarCompact : styles.toolbar}>
+          <div style={compact ? styles.searchWrapCompact : styles.searchWrap}>
             <Search size={16} color="#5a5a5a" strokeWidth={1.7} />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search alert ID, type, camera or category..."
+              placeholder="Search alert ID, type or camera..."
               style={styles.searchInput}
             />
           </div>
@@ -105,48 +115,31 @@ export default function AlertsPage() {
             }}
           >
             <Filter size={15} color={showFilters ? '#ff5b51' : '#9a9a9a'} strokeWidth={1.7} />
-            <span>{showFilters ? 'Hide Filters' : 'Filters'}</span>
+            <span>Filters</span>
           </button>
 
-          <div style={styles.legend}>
-            <LegendDot color="#ff5b51" label={`High (${counts.critical})`} />
-            <LegendDot color="#d8b25a" label={`Medium (${counts.warning})`} />
-            <LegendDot color="#6d8dff" label={`Low (${counts.info})`} />
-            <LegendDot color="#5f5f5f" label={`Open (${counts.open})`} />
-          </div>
-        </div>
-
-        <div style={styles.filterRow}>
-          {SEVERITY_FILTERS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setSeverityFilter(item.id)}
-              style={{
-                ...styles.filterChip,
-                ...(severityFilter === item.id ? styles.filterChipActive : null),
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-          <div style={styles.statusBadge}>
-            <span style={{
-              ...styles.statusDot,
-              backgroundColor: status === 'live' ? '#ff4d43' : '#5d5d5d',
-            }} />
-            <span>{status === 'live' ? 'Detection Server Live' : 'Waiting For Backend'}</span>
+          <div style={compact ? styles.legendCompact : styles.legend}>
+            <LegendDot color="#ff5b51" label={`High Priority (${counts.critical})`} />
+            <LegendDot color="#d8b25a" label={`Medium Priority (${counts.warning})`} />
+            <LegendDot color="#8f8f8f" label={`Low Priority (${counts.info})`} />
           </div>
         </div>
 
         {showFilters && (
           <div style={styles.filterPanel}>
+            <FilterGroup label="Priority" values={SEVERITY_FILTERS} current={severityFilter} onSelect={setSeverityFilter} />
             <FilterGroup label="Category" values={CATEGORY_FILTERS} current={categoryFilter} onSelect={setCategoryFilter} />
             <FilterGroup label="Status" values={STATUS_FILTERS} current={statusFilter} onSelect={setStatusFilter} />
-            <button type="button" onClick={clearFilters} style={styles.clearButton}>
-              <X size={14} color="#9a9a9a" strokeWidth={1.8} />
-              <span>Clear Filters</span>
-            </button>
+            <div style={styles.filterPanelActions}>
+              <div style={styles.statusBadge}>
+                <span style={{ ...styles.statusDot, backgroundColor: status === 'live' ? '#ff4d43' : '#5d5d5d' }} />
+                <span>{status === 'live' ? 'Detection Server Live' : 'Waiting For Backend'}</span>
+              </div>
+              <button type="button" onClick={clearFilters} style={styles.clearButton}>
+                <X size={14} color="#9a9a9a" strokeWidth={1.8} />
+                <span>Clear</span>
+              </button>
+            </div>
           </div>
         )}
 
@@ -155,20 +148,20 @@ export default function AlertsPage() {
             <span style={styles.emptyTitle}>No alerts match the current filter</span>
             <span style={styles.emptyHint}>
               {status === 'live'
-                ? 'Try triggering a phone, crowd, or feed-health event, or clear the search box.'
+                ? 'Try a different query, or let the detector run until new phone, crowd, or feed alerts arrive.'
                 : 'Make sure `python server/app.py` is running, then refresh this page.'}
             </span>
           </div>
         ) : (
-          <div style={styles.grid}>
-            {visibleAlerts.map((alert, index) => (
+          <div style={compact ? styles.gridCompact : styles.grid}>
+            {visibleAlerts.map((alert) => (
               <AlertCard
                 key={alert.id}
                 alert={alert}
                 camera={camerasByAlertId.get(alert.cameraId) || null}
-                index={index}
-                onAcknowledge={() => handleAcknowledge(alert.id)}
                 onOpen={() => navigate('/')}
+                onStatusChange={updateAlertStatus}
+                compact={narrowCards}
               />
             ))}
           </div>
@@ -192,40 +185,42 @@ function FilterGroup({ label, values, current, onSelect }) {
     <div style={styles.filterGroup}>
       <span style={styles.filterGroupLabel}>{label}</span>
       <div style={styles.filterGroupValues}>
-        {values.map((value) => (
-          <button
-            key={value}
-            type="button"
-            onClick={() => onSelect(value)}
-            style={{
-              ...styles.pillButton,
-              ...(current === value ? styles.pillButtonActive : null),
-            }}
-          >
-            {value === 'all' ? 'All' : value}
-          </button>
-        ))}
+        {values.map((value) => {
+          const normalizedValue = typeof value === 'string' ? value : value.id
+          const displayLabel = typeof value === 'string' ? (value === 'all' ? 'All' : capitalize(value)) : value.label
+
+          return (
+            <button
+              key={normalizedValue}
+              type="button"
+              onClick={() => onSelect(normalizedValue)}
+              style={{
+                ...styles.pillButton,
+                ...(current === normalizedValue ? styles.pillButtonActive : null),
+              }}
+            >
+              {displayLabel}
+            </button>
+          )
+        })}
       </div>
     </div>
   )
 }
 
-function AlertCard({ alert, camera, index, onAcknowledge, onOpen }) {
+function AlertCard({ alert, camera, onOpen, onStatusChange, compact = false }) {
   const tone = getAlertTone(alert.severity)
   const previewTone = getPreviewTone(alert.severity)
-  const icon = getAlertIcon(alert.type)
-  const isClosed = alert.status === 'closed'
-  const isCameraAvailable = Boolean(camera)
+  const icon = getAlertIcon(alert.kind || alert.type)
   const previewSource = getAlertPreviewSource(alert, camera)
   const [previewFailed, setPreviewFailed] = useState(false)
+  const nextStatus = alert.status === 'open' ? 'acknowledged' : 'resolved'
 
   return (
     <article style={{ ...styles.card, ...tone }}>
       <div style={{ ...styles.preview, ...previewTone }}>
         <span style={styles.alertId}>ALT-{String(alert.id).padStart(3, '0')}</span>
-        {!isCameraAvailable && (
-          <span style={styles.previewStatus}>Feed Removed</span>
-        )}
+
         {previewSource && !previewFailed ? (
           <img
             src={previewSource}
@@ -235,38 +230,16 @@ function AlertCard({ alert, camera, index, onAcknowledge, onOpen }) {
           />
         ) : (
           <div style={styles.previewFallback}>
-            <span style={styles.previewFallbackTitle}>
-              {isCameraAvailable ? 'Preview Unavailable' : 'Archived Alert'}
-            </span>
-            <span style={styles.previewFallbackText}>
-              {isCameraAvailable
-                ? 'No frame could be loaded for this alert right now.'
-                : 'This alert still has its details, but the original camera feed was removed from Settings.'}
-            </span>
+            <span style={styles.previewFallbackTitle}>Preview unavailable</span>
+            <span style={styles.previewFallbackText}>This alert still has its metadata, but no frame could be loaded right now.</span>
           </div>
         )}
-        <div style={styles.previewNoise} />
       </div>
 
       <div style={styles.cardBody}>
         <div style={styles.titleRow}>
           <div style={styles.iconWrap}>{icon}</div>
-          <div style={styles.titleStack}>
-            <span style={styles.cardTitle}>{alert.type}</span>
-            <div style={styles.badgeRow}>
-              <span style={styles.categoryBadge}>{alert.category}</span>
-              <span style={{
-                ...styles.priorityBadge,
-                ...(alert.severity === 'critical'
-                  ? styles.priorityHigh
-                  : alert.severity === 'warning'
-                    ? styles.priorityMedium
-                    : styles.priorityLow),
-              }}>
-                {alert.priorityLabel} Priority
-              </span>
-            </div>
-          </div>
+          <span style={styles.cardTitle}>{alert.type}</span>
         </div>
 
         <div style={styles.divider} />
@@ -274,7 +247,7 @@ function AlertCard({ alert, camera, index, onAcknowledge, onOpen }) {
         <div style={styles.metaGrid}>
           <div style={styles.metaBlock}>
             <span style={styles.metaLabel}>LOCATION</span>
-            <span style={styles.metaValue}>{formatLocation(alert)}</span>
+            <span style={styles.metaValue}>{formatLocation(alert, camera)}</span>
           </div>
           <div style={styles.metaBlockRight}>
             <span style={styles.metaLabel}>TIMESTAMP</span>
@@ -283,34 +256,22 @@ function AlertCard({ alert, camera, index, onAcknowledge, onOpen }) {
         </div>
 
         <div style={styles.detailRow}>
-          <span style={styles.detailText}>{alert.detail || 'Live event received from detector feed.'}</span>
-          <span style={styles.sequenceText}>#{index + 1}</span>
+          <span style={styles.detailText}>{alert.detail || 'Live event received from the detector feed.'}</span>
         </div>
 
-        <div style={styles.cardActions}>
-          <button
-            type="button"
-            onClick={onOpen}
-            style={{
-              ...styles.actionPrimary,
-              ...(!isCameraAvailable ? styles.actionUnavailable : null),
-            }}
-            disabled={!isCameraAvailable}
-          >
-            <ExternalLink size={14} color={isCameraAvailable ? '#f6f2f2' : '#8e8e8e'} strokeWidth={1.8} />
-            <span>{isCameraAvailable ? 'Open Feed' : 'Feed Removed'}</span>
+        <div style={compact ? styles.cardActionsCompact : styles.cardActions}>
+          <button type="button" onClick={onOpen} style={styles.actionGhost}>
+            <ExternalLink size={14} color="#d0d0ce" strokeWidth={1.8} />
+            <span>Open Feed</span>
           </button>
           <button
             type="button"
-            onClick={onAcknowledge}
-            style={{
-              ...styles.actionSecondary,
-              ...(isClosed ? styles.actionDisabled : null),
-            }}
-            disabled={isClosed}
+            onClick={() => onStatusChange(alert.id, nextStatus)}
+            style={alert.status === 'resolved' ? styles.actionDisabled : styles.actionPrimary}
+            disabled={alert.status === 'resolved'}
           >
-            <CheckCheck size={14} color="#a0a0a0" strokeWidth={1.8} />
-            <span>{isClosed ? 'Closed' : 'Close Alert'}</span>
+            <CheckCheck size={14} color={alert.status === 'resolved' ? '#8e8e8e' : '#f3f0f0'} strokeWidth={1.8} />
+            <span>{alert.status === 'open' ? 'Acknowledge' : alert.status === 'acknowledged' ? 'Resolve' : 'Resolved'}</span>
           </button>
         </div>
       </div>
@@ -330,27 +291,46 @@ function getPreviewTone(severity) {
   return styles.previewInfo
 }
 
-function getAlertIcon(type) {
-  const lower = String(type).toLowerCase()
+function getAlertIcon(kind) {
+  const lower = String(kind).toLowerCase()
 
   if (lower.includes('phone')) return <Smartphone size={16} color="#ff5b51" strokeWidth={1.8} />
   if (lower.includes('capacity') || lower.includes('crowd')) return <Users size={16} color="#d8b25a" strokeWidth={1.8} />
-  if (lower.includes('timeout') || lower.includes('feed')) return <Eye size={16} color="#6d8dff" strokeWidth={1.8} />
+  if (lower.includes('timeout') || lower.includes('feed')) return <WifiOff size={16} color="#8798ff" strokeWidth={1.8} />
+  if (lower.includes('tripwire')) return <Eye size={16} color="#b4b4b2" strokeWidth={1.8} />
   return <TriangleAlert size={16} color="#ff5b51" strokeWidth={1.8} />
-}
-
-function formatLocation(alert) {
-  return alert.cameraId ? `${alert.cameraId}` : String(alert.target || 'LIVE FEED').toUpperCase()
-}
-
-function formatTimestamp(timestamp) {
-  return timestamp ? `Today ${timestamp}` : 'Today --:--:--'
 }
 
 function getAlertPreviewSource(alert, camera) {
   if (alert.previewUrl) return alert.previewUrl
   if (camera?.sourceUrl) return camera.sourceUrl
   return null
+}
+
+function formatLocation(alert, camera) {
+  const location = camera?.location || alert.target || alert.cameraId || 'LIVE FEED'
+  const cameraLabel = camera?.label || alert.cameraId || ''
+  return cameraLabel ? `${cameraLabel} - ${String(location).toUpperCase()}` : String(location).toUpperCase()
+}
+
+function formatTimestamp(timestamp) {
+  return timestamp ? `Today ${timestamp}` : 'Today --:--:--'
+}
+
+function formatStatus(status) {
+  if (status === 'acknowledged') return 'ACKNOWLEDGED'
+  if (status === 'resolved') return 'RESOLVED'
+  return 'OPEN'
+}
+
+function getStatusStyle(status) {
+  if (status === 'acknowledged') return styles.statusAcknowledged
+  if (status === 'resolved') return styles.statusResolved
+  return styles.statusOpen
+}
+
+function capitalize(value) {
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`
 }
 
 const styles = {
@@ -369,16 +349,34 @@ const styles = {
     gap: '14px',
     flexWrap: 'wrap',
   },
+  toolbarCompact: {
+    display: 'flex',
+    alignItems: 'stretch',
+    gap: '12px',
+    flexWrap: 'wrap',
+  },
   searchWrap: {
     display: 'flex',
     alignItems: 'center',
     gap: '10px',
-    width: 'min(100%, 420px)',
+    width: 'min(100%, 360px)',
     backgroundColor: '#121212',
     border: '1px solid #1b1b1b',
     borderRadius: '6px',
     padding: '0 14px',
-    height: '44px',
+    height: '38px',
+  },
+  searchWrapCompact: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    width: '100%',
+    minWidth: 0,
+    backgroundColor: '#121212',
+    border: '1px solid #1b1b1b',
+    borderRadius: '6px',
+    padding: '0 14px',
+    height: '38px',
   },
   searchInput: {
     flex: 1,
@@ -392,7 +390,7 @@ const styles = {
     display: 'inline-flex',
     alignItems: 'center',
     gap: '8px',
-    height: '44px',
+    height: '38px',
     padding: '0 16px',
     borderRadius: '8px',
     border: '1px solid #1f1f1f',
@@ -414,6 +412,13 @@ const styles = {
     marginLeft: 'auto',
     flexWrap: 'wrap',
   },
+  legendCompact: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '18px',
+    flexWrap: 'wrap',
+    width: '100%',
+  },
   legendItem: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -424,46 +429,6 @@ const styles = {
   legendDot: {
     width: '9px',
     height: '9px',
-    borderRadius: '999px',
-    display: 'inline-block',
-  },
-  filterRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-    flexWrap: 'wrap',
-  },
-  filterChip: {
-    padding: '8px 14px',
-    borderRadius: '999px',
-    border: '1px solid #252525',
-    backgroundColor: '#111111',
-    color: '#8e8e8e',
-    fontSize: '12px',
-    fontWeight: 700,
-    letterSpacing: '0.04em',
-  },
-  filterChipActive: {
-    backgroundColor: '#2a0d0d',
-    border: '1px solid #5d1f1f',
-    color: '#ff5b51',
-  },
-  statusBadge: {
-    marginLeft: 'auto',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '8px 12px',
-    borderRadius: '999px',
-    backgroundColor: '#101010',
-    border: '1px solid #1e1e1e',
-    color: '#8f8f8f',
-    fontSize: '12px',
-    fontWeight: 700,
-  },
-  statusDot: {
-    width: '8px',
-    height: '8px',
     borderRadius: '999px',
     display: 'inline-block',
   },
@@ -504,9 +469,33 @@ const styles = {
     cursor: 'pointer',
   },
   pillButtonActive: {
-    border: '1px solid #424242',
-    backgroundColor: '#1b1b1b',
-    color: '#e2e2e2',
+    border: '1px solid #4d2020',
+    backgroundColor: '#1b1010',
+    color: '#ff5b51',
+  },
+  filterPanelActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    marginLeft: 'auto',
+  },
+  statusBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '8px 12px',
+    borderRadius: '999px',
+    backgroundColor: '#101010',
+    border: '1px solid #1e1e1e',
+    color: '#8f8f8f',
+    fontSize: '12px',
+    fontWeight: 700,
+  },
+  statusDot: {
+    width: '8px',
+    height: '8px',
+    borderRadius: '999px',
+    display: 'inline-block',
   },
   clearButton: {
     display: 'inline-flex',
@@ -544,6 +533,11 @@ const styles = {
     gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
     gap: '16px',
   },
+  gridCompact: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr)',
+    gap: '16px',
+  },
   card: {
     borderRadius: '8px',
     overflow: 'hidden',
@@ -565,8 +559,7 @@ const styles = {
   preview: {
     position: 'relative',
     height: '188px',
-    background:
-      'linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.02)), radial-gradient(circle at 70% 30%, rgba(255,255,255,0.12), transparent 32%), linear-gradient(0deg, #1b1b1b, #0f0f0f)',
+    background: 'linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.02)), linear-gradient(0deg, #1b1b1b, #0f0f0f)',
   },
   previewImage: {
     position: 'absolute',
@@ -574,6 +567,7 @@ const styles = {
     width: '100%',
     height: '100%',
     objectFit: 'cover',
+    filter: 'grayscale(100%)',
   },
   previewCritical: {
     borderBottom: '1px solid rgba(255, 82, 72, 0.22)',
@@ -584,19 +578,9 @@ const styles = {
   previewInfo: {
     borderBottom: '1px solid rgba(109, 141, 255, 0.22)',
   },
-  previewNoise: {
-    position: 'absolute',
-    inset: 0,
-    background:
-      'linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 100%), linear-gradient(0deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 100%)',
-    backgroundSize: '32px 32px',
-    opacity: 0.22,
-    pointerEvents: 'none',
-  },
   previewFallback: {
     position: 'absolute',
     inset: 0,
-    zIndex: 1,
     display: 'flex',
     flexDirection: 'column',
     justifyContent: 'flex-end',
@@ -627,16 +611,39 @@ const styles = {
     fontSize: '12px',
     fontWeight: 700,
   },
-  previewStatus: {
+  statusOpen: {
     position: 'absolute',
     top: '14px',
     right: '14px',
-    zIndex: 2,
+    zIndex: 1,
     padding: '5px 10px',
-    borderRadius: '999px',
-    backgroundColor: 'rgba(12, 12, 12, 0.86)',
-    border: '1px solid rgba(255, 255, 255, 0.08)',
-    color: '#c4c4c4',
+    borderRadius: '4px',
+    backgroundColor: '#ef3a2d',
+    color: '#fff1ef',
+    fontSize: '11px',
+    fontWeight: 700,
+  },
+  statusAcknowledged: {
+    position: 'absolute',
+    top: '14px',
+    right: '14px',
+    zIndex: 1,
+    padding: '5px 10px',
+    borderRadius: '4px',
+    backgroundColor: '#d6a30e',
+    color: '#fff7dc',
+    fontSize: '11px',
+    fontWeight: 700,
+  },
+  statusResolved: {
+    position: 'absolute',
+    top: '14px',
+    right: '14px',
+    zIndex: 1,
+    padding: '5px 10px',
+    borderRadius: '4px',
+    backgroundColor: '#4f4f4f',
+    color: '#e4e4e4',
     fontSize: '11px',
     fontWeight: 700,
   },
@@ -650,53 +657,8 @@ const styles = {
   },
   titleRow: {
     display: 'flex',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: '12px',
-  },
-  titleStack: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '8px',
-    flex: 1,
-  },
-  badgeRow: {
-    display: 'flex',
-    gap: '8px',
-    flexWrap: 'wrap',
-  },
-  categoryBadge: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    padding: '4px 8px',
-    borderRadius: '999px',
-    backgroundColor: '#1b1b1b',
-    color: '#aaaaaa',
-    border: '1px solid #2a2a2a',
-    fontSize: '11px',
-    fontWeight: 700,
-  },
-  priorityBadge: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    padding: '4px 8px',
-    borderRadius: '999px',
-    fontSize: '11px',
-    fontWeight: 700,
-  },
-  priorityHigh: {
-    backgroundColor: '#2b1111',
-    color: '#ff8a82',
-    border: '1px solid #5d2020',
-  },
-  priorityMedium: {
-    backgroundColor: '#2b2210',
-    color: '#e0bf72',
-    border: '1px solid #5a4720',
-  },
-  priorityLow: {
-    backgroundColor: '#141d2f',
-    color: '#93a8ff',
-    border: '1px solid #30426f',
   },
   iconWrap: {
     width: '32px',
@@ -741,31 +703,42 @@ const styles = {
     letterSpacing: '0.08em',
   },
   metaValue: {
-    fontSize: '14px',
+    fontSize: '13px',
     fontWeight: 700,
     color: '#8f8f8f',
   },
   detailRow: {
     display: 'flex',
-    alignItems: 'flex-start',
-    gap: '12px',
-    justifyContent: 'space-between',
   },
   detailText: {
     color: '#6b6b6b',
     fontSize: '13px',
     lineHeight: 1.5,
-    maxWidth: '85%',
-  },
-  sequenceText: {
-    color: '#4f4f4f',
-    fontSize: '12px',
-    fontWeight: 700,
   },
   cardActions: {
     display: 'flex',
     gap: '10px',
     marginTop: 'auto',
+  },
+  cardActionsCompact: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr)',
+    gap: '10px',
+    marginTop: 'auto',
+  },
+  actionGhost: {
+    flex: 1,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    border: '1px solid #2a2a2a',
+    backgroundColor: '#111111',
+    color: '#d0d0ce',
+    borderRadius: '8px',
+    padding: '10px 12px',
+    cursor: 'pointer',
+    fontWeight: 700,
   },
   actionPrimary: {
     flex: 1,
@@ -781,29 +754,18 @@ const styles = {
     cursor: 'pointer',
     fontWeight: 700,
   },
-  actionSecondary: {
+  actionDisabled: {
     flex: 1,
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
     gap: '8px',
     border: '1px solid #2a2a2a',
-    backgroundColor: '#111111',
-    color: '#b0b0b0',
+    backgroundColor: '#1a1a1a',
+    color: '#8e8e8e',
     borderRadius: '8px',
     padding: '10px 12px',
-    cursor: 'pointer',
+    cursor: 'default',
     fontWeight: 700,
-  },
-  actionDisabled: {
-    opacity: 0.6,
-    cursor: 'default',
-  },
-  actionUnavailable: {
-    opacity: 0.45,
-    cursor: 'default',
-    border: '1px solid #2a2a2a',
-    backgroundColor: '#171717',
-    color: '#9b9b9b',
   },
 }

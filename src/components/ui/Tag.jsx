@@ -1,5 +1,5 @@
 /**
- * Tag — feature tag chip, e.g. "CROWD COUNT", "HEATMAP", "TRIPWIRE"
+ * Tag ??compact chip used for camera labels and mode tags.
  */
 export default function Tag({ children }) {
   return (

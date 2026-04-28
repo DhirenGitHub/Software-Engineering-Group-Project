@@ -1,11 +1,12 @@
-import { createContext, useContext, useState, useCallback, useEffect } from 'react'
+import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react'
+import { DETECTION_SERVER } from '../lib/detectionServer'
 
 const CameraContext = createContext(null)
 
 const STORAGE_KEY = 'segp_cameras'
-const DETECTION_SERVER = 'http://localhost:5000'
 const DEFAULT_BACKEND_MODEL = 'person'
 const BACKEND_REHYDRATE_SOURCE_TYPES = new Set(['device', 'file'])
+const FETCH_TIMEOUT_MS = 5000
 
 function normalizeCamera(camera) {
   if (!camera || typeof camera !== 'object') return null
@@ -82,14 +83,23 @@ export function CameraProvider({ children }) {
   }, [])
 
   useEffect(() => {
-    let cancelled = false
+    const abortRef = { current: false }
     const syncPersistedCameras = async () => {
+      if (abortRef.current) return
+
       const persistedBackendCameras = cameras.filter(shouldRehydrateBackend)
       if (persistedBackendCameras.length === 0) return
 
       let registeredCameraIds = new Set()
       try {
-        const response = await fetch(`${DETECTION_SERVER}/cameras`)
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+
+        const response = await fetch(`${DETECTION_SERVER}/cameras`, {
+          signal: controller.signal,
+        })
+        clearTimeout(timeoutId)
+
         if (!response.ok) return
         const backendCameras = await response.json()
         registeredCameraIds = new Set(
@@ -108,16 +118,22 @@ export function CameraProvider({ children }) {
         const targetModel = camera.targetModel || DEFAULT_BACKEND_MODEL
 
         try {
+          const controller = new AbortController()
+          const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+
           const response = await fetch(`${DETECTION_SERVER}/cameras`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: backendId, source, model: targetModel }),
+            signal: controller.signal,
           })
+          clearTimeout(timeoutId)
+
           if (!response.ok) continue
 
           const data = await response.json()
           registeredCameraIds.add(backendId)
-          if (cancelled) return
+          if (abortRef.current) return
 
           setCameras((prev) => {
             let changed = false
@@ -153,7 +169,6 @@ export function CameraProvider({ children }) {
             return next
           })
         } catch {
-          // Keep the saved camera config intact if the backend is offline.
         }
       }
     }
@@ -162,7 +177,7 @@ export function CameraProvider({ children }) {
     const timer = window.setInterval(syncPersistedCameras, 5000)
 
     return () => {
-      cancelled = true
+      abortRef.current = true
       window.clearInterval(timer)
     }
   }, [cameras])
