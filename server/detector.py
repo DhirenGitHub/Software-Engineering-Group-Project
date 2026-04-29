@@ -10,6 +10,7 @@ import os
 import queue as _queue
 import threading
 import time
+from collections import deque
 import numpy as np
 import cv2
 from pathlib import Path
@@ -66,6 +67,24 @@ def _apply_heatmap(frame, accumulator, boxes_xyxy):
     out      = frame.copy()
     np.putmask(out, mask_3ch, blended)
     return out
+
+
+def _detect_crowd_anomaly(count_history):
+    """Return anomaly dict if a sudden surge or dispersal is detected in the last 4 s."""
+    if len(count_history) < 3:
+        return {"active": False, "kind": None, "detail": ""}
+    now = time.time()
+    recent = [(t, c) for t, c in count_history if now - t <= 4.0]
+    if len(recent) < 2:
+        return {"active": False, "kind": None, "detail": ""}
+    delta = recent[-1][1] - recent[0][1]
+    if delta >= 4:
+        return {"active": True, "kind": "surge",
+                "detail": f"Sudden crowd surge (+{delta} people in 4 s)"}
+    if delta <= -4:
+        return {"active": True, "kind": "dispersal",
+                "detail": f"Sudden dispersal ({abs(delta)} people left in 4 s)"}
+    return {"active": False, "kind": None, "detail": ""}
 
 
 # ── CLIP / ChromaDB live indexer ─────────────────────────────────────────────
@@ -308,8 +327,28 @@ class OptimisedDetector:
         self._last_index_time:  float                      = 0.0
         self._cap = None  # store capture reference for clean release
 
-        # For webcam / device sources, cv2 expects an int index
-        self._cv2_source = int(source) if str(source).isdigit() else source
+        # Feature flags (toggled live via /cameras/<id>/features)
+        self.anomaly_enabled = False
+        self._count_history  = deque(maxlen=120)   # (timestamp, person_count)
+        self._anomaly_state  = {"active": False, "kind": None, "detail": ""}
+
+        # For webcam / device sources, cv2 expects an int index.
+        # For file paths, resolve relative paths against the project root so
+        # paths like "public/video1.mp4" or "../video2.mp4" work when the
+        # server is started from any working directory.
+        if str(source).isdigit():
+            self._cv2_source = int(source)
+        else:
+            src = str(source).strip().strip('"').strip("'")  # remove accidental surrounding quotes
+            if not src.startswith(("rtsp://", "rtmp://", "http://", "https://", "push")):
+                candidate = Path(src)
+                if not candidate.is_absolute():
+                    # resolve relative to the project root (parent of server/)
+                    project_root = Path(__file__).parent.parent
+                    candidate = (project_root / candidate).resolve()
+                if candidate.exists():
+                    src = str(candidate)
+            self._cv2_source = src
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -362,6 +401,8 @@ class OptimisedDetector:
 
         if not cap.isOpened():
             print(f"[detector] ERROR: Cannot open source: {self.source}")
+            with self._lock:
+                self._latest_stats["source_error"] = f"Cannot open: {self.source}"
             self._running = False
             return
 
@@ -446,6 +487,17 @@ class OptimisedDetector:
             heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
             now = time.time()
 
+            # Read feature flags under lock so HTTP toggling can't race
+            with self._lock:
+                anomaly_on = self.anomaly_enabled
+
+            # Crowd anomaly detection
+            anomaly_state = {"active": False, "kind": None, "detail": ""}
+            if anomaly_on:
+                self._count_history.append((now, person_count))
+                anomaly_state = _detect_crowd_anomaly(self._count_history)
+            self._anomaly_state = anomaly_state
+
             with self._lock:
                 self._annotated_frame = annotated
                 self._count           = total_count
@@ -456,6 +508,7 @@ class OptimisedDetector:
                     "total_count": total_count,
                     "updated_at": now,
                     "has_frame": True,
+                    "anomaly": anomaly_state,
                 }
                 # Accumulate peaks so alerts never miss transient detections
                 if phone_count > self._peak_stats["peak_phone_count"]:
@@ -538,6 +591,11 @@ class PushDetector:
         self._heat_accumulator: np.ndarray | None = None
         self._heatmap_frame:    np.ndarray | None = None
         self._last_index_time:  float             = 0.0
+
+        # Feature flags
+        self.anomaly_enabled = False
+        self._count_history  = deque(maxlen=120)
+        self._anomaly_state  = {"active": False, "kind": None, "detail": ""}
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -649,6 +707,17 @@ class PushDetector:
             heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
             now = time.time()
 
+            # Read feature flags under lock so HTTP toggling can't race
+            with self._lock:
+                anomaly_on = self.anomaly_enabled
+
+            # Crowd anomaly detection
+            anomaly_state = {"active": False, "kind": None, "detail": ""}
+            if anomaly_on:
+                self._count_history.append((now, person_count))
+                anomaly_state = _detect_crowd_anomaly(self._count_history)
+            self._anomaly_state = anomaly_state
+
             with self._lock:
                 self._annotated_frame = annotated
                 self._count           = total_count
@@ -659,6 +728,7 @@ class PushDetector:
                     "total_count": total_count,
                     "updated_at": now,
                     "has_frame": True,
+                    "anomaly": anomaly_state,
                 }
                 # Accumulate peaks so alerts never miss transient detections
                 if phone_count > self._peak_stats["peak_phone_count"]:

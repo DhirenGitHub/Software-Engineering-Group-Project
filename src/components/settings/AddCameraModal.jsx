@@ -16,14 +16,14 @@ const SOURCE_TYPES = [
 const URL_PLACEHOLDERS = {
   rtsp: 'rtsp://192.168.1.101/stream1',
   mjpeg_http: 'http://192.168.1.101/video',
-  file: 'C:\\Users\\ASUS Vivobook\\OneDrive\\Desktop\\Software-Engineering-Group-Project\\videos\\sample.mp4',
+  file: 'public/video1.mp4  or  ../video2.mp4',
   device: 'Leave blank for default webcam',
 }
 
 const URL_HINTS = {
   rtsp: 'The backend will open the RTSP stream and expose an annotated MJPEG feed to the dashboard.',
   mjpeg_http: 'Use the raw MJPEG camera URL. The backend will wrap it with live detection overlays.',
-  file: 'Local video files are ideal for testing. Absolute Windows paths work here.',
+  file: 'Use a relative path from the project root (e.g. public/video1.mp4 or ../video2.mp4) or an absolute Windows path.',
   device: 'The browser will ask for camera permission. You can optionally paste a specific deviceId.',
 }
 
@@ -129,10 +129,14 @@ export default function AddCameraModal({ open, onClose, onSave, initial = null }
           throw new Error(payload?.error || 'Unable to register this source with the detection backend.')
         }
 
+        // Always use the same host the frontend talks to (localhost) rather than
+        // the network IP the server reports — avoids black feed when running locally.
+        const streamUrl = `${DETECTION_SERVER}/video/${backendId}`
+
         finalForm = {
           ...finalForm,
           sourceType: 'mjpeg_http',
-          sourceUrl: payload.stream,
+          sourceUrl: streamUrl,
           rawSourceType: form.sourceType,
           rawUrl: form.sourceUrl.trim(),
           backendId,
@@ -359,7 +363,8 @@ async function testBackendSource({ sourceType, sourceUrl, targetModel }) {
         return true
       }
       if (debugPayload?.detector_running === false) {
-        return false
+        const err = debugPayload?.current_stats?.source_error
+        throw new Error(err || 'Detector stopped — check the file path in the server terminal.')
       }
     }
 

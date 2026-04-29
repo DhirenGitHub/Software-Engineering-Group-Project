@@ -111,6 +111,18 @@ ALERT_KINDS = {
         "category": "Feed Health",
         "status": "open",
     },
+    "surge": {
+        "severity": "critical",
+        "priorityLabel": "High",
+        "category": "Crowd Anomaly",
+        "status": "open",
+    },
+    "dispersal": {
+        "severity": "warning",
+        "priorityLabel": "Medium",
+        "category": "Crowd Anomaly",
+        "status": "open",
+    },
 }
 
 ALERT_THRESHOLDS = {
@@ -335,6 +347,20 @@ def _sync_alerts():
                 ts=now,
             )
 
+        # Crowd anomaly alerts (surge / dispersal)
+        anomaly = getattr(detector, "_anomaly_state", {})
+        if anomaly.get("active") and anomaly.get("kind") in {"surge", "dispersal"}:
+            kind = anomaly["kind"]
+            alert_type = "Crowd Surge Detected" if kind == "surge" else "Sudden Crowd Dispersal"
+            _push_alert(
+                cam_id=cam_id,
+                kind=kind,
+                alert_type=alert_type,
+                target=cam_id,
+                detail=anomaly.get("detail", ""),
+                ts=now,
+            )
+
 
 def _alert_sync_loop():
     """Background thread: runs _sync_alerts every 3 seconds so alerts fire
@@ -379,6 +405,10 @@ def debug_camera(cam_id):
         "alert_count": len(_alerts),
         "detector_running": getattr(d, "_running", None),
         "model_paths": getattr(d, "model_paths", []),
+        "features": {
+            "anomaly": getattr(d, "anomaly_enabled", False),
+        },
+        "anomaly_state": getattr(d, "_anomaly_state", {}),
     })
 
 
@@ -472,6 +502,24 @@ def remove_camera(cam_id):
     return jsonify({"stopped": cam_id})
 
 
+@app.route("/cameras/<cam_id>/features", methods=["GET", "POST"])
+def camera_features(cam_id):
+    """Get or set per-camera feature flags (flow, anomaly)."""
+    d = _detectors.get(cam_id)
+    if d is None:
+        return jsonify({"error": "not found"}), 404
+    if request.method == "POST":
+        body = request.get_json(force=True) or {}
+        if "anomaly" in body:
+            d.anomaly_enabled = bool(body["anomaly"])
+            if not d.anomaly_enabled:
+                d._anomaly_state = {"active": False, "kind": None, "detail": ""}
+    return jsonify({
+        "anomaly": getattr(d, "anomaly_enabled", False),
+        "anomalyState": getattr(d, "_anomaly_state", {}),
+    })
+
+
 # ── Frame push (phone → server) ───────────────────────────────────────────────
 
 @app.route("/frame/<cam_id>", methods=["POST"])
@@ -514,12 +562,18 @@ def heatmap_feed(cam_id):
 
 
 def _generate(detector):
+    waited = 0.0
     while True:
         frame, _ = detector.get_latest()
 
         if frame is None:
+            # If detector stopped (file not found etc.) give up after 5 s
+            if not detector._running and waited > 5.0:
+                return
             time.sleep(0.02)
+            waited += 0.02
             continue
+        waited = 0.0
 
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_Q])
         if not ok:
