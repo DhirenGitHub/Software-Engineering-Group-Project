@@ -15,6 +15,7 @@ export default function CameraFeed({ camera, detectionOn = true }) {
   // ── Anomaly state (polled from backend)
   const [anomalyActive, setAnomalyActive] = useState(false)
   const [anomalyDetail, setAnomalyDetail] = useState('')
+  const [anomalyKind, setAnomalyKind] = useState(null)
 
   const hasBackend = Boolean(backendId)
 
@@ -47,6 +48,7 @@ export default function CameraFeed({ camera, detectionOn = true }) {
         const state = data.anomalyState || {}
         setAnomalyActive(Boolean(state.active))
         setAnomalyDetail(state.detail || '')
+        setAnomalyKind(state.kind || null)
       } catch { /* backend offline */ }
     }
 
@@ -95,11 +97,28 @@ export default function CameraFeed({ camera, detectionOn = true }) {
           <span style={styles.recText}>REC</span>
         </div>
 
-        {/* Anomaly badge — shown when crowd anomaly is active */}
+        {/* Anomaly badge — shown when any anomaly is active */}
         {anomalyActive && (
-          <div style={styles.anomalyBadge} title={anomalyDetail}>
-            <span style={styles.anomalyDot} />
-            <span style={styles.anomalyText}>ANOMALY</span>
+          <div
+            style={{
+              ...styles.anomalyBadge,
+              ...(anomalyKind === 'loitering' ? styles.anomalyBadgeLoitering : {}),
+            }}
+            title={anomalyDetail}
+          >
+            <span
+              style={{
+                ...styles.anomalyDot,
+                ...(anomalyKind === 'loitering' ? styles.anomalyDotLoitering : {}),
+              }}
+            />
+            <span style={styles.anomalyText}>
+              {anomalyKind === 'panic' ? 'PANIC'
+                : anomalyKind === 'loitering' ? 'LOITERING'
+                : anomalyKind === 'surge' ? 'SURGE'
+                : anomalyKind === 'dispersal' ? 'DISPERSAL'
+                : 'ANOMALY'}
+            </span>
           </div>
         )}
 
@@ -467,6 +486,14 @@ const styles = {
     borderRadius: '50%',
     backgroundColor: '#ff6b6b',
     boxShadow: '0 0 6px rgba(255, 107, 107, 0.9)',
+  },
+  anomalyBadgeLoitering: {
+    backgroundColor: 'rgba(120, 100, 0, 0.85)',
+    border: '1px solid rgba(220, 180, 0, 0.6)',
+  },
+  anomalyDotLoitering: {
+    backgroundColor: '#ffe066',
+    boxShadow: '0 0 6px rgba(255, 224, 102, 0.9)',
   },
   anomalyText: {
     fontSize: '9px',

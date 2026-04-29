@@ -90,6 +90,8 @@ ALERT_COOLDOWNS = {
     "phone": 8.0,
     "crowd": 12.0,
     "offline": 20.0,
+    "panic": 8.0,
+    "loitering": 15.0,
 }
 
 ALERT_KINDS = {
@@ -121,6 +123,18 @@ ALERT_KINDS = {
         "severity": "warning",
         "priorityLabel": "Medium",
         "category": "Crowd Anomaly",
+        "status": "open",
+    },
+    "panic": {
+        "severity": "critical",
+        "priorityLabel": "High",
+        "category": "Behaviour Anomaly",
+        "status": "open",
+    },
+    "loitering": {
+        "severity": "warning",
+        "priorityLabel": "Medium",
+        "category": "Behaviour Anomaly",
         "status": "open",
     },
 }
@@ -347,19 +361,38 @@ def _sync_alerts():
                 ts=now,
             )
 
-        # Crowd anomaly alerts (surge / dispersal)
+        # Crowd anomaly alerts (surge / dispersal) and behaviour anomaly alerts (panic / loitering)
         anomaly = getattr(detector, "_anomaly_state", {})
-        if anomaly.get("active") and anomaly.get("kind") in {"surge", "dispersal"}:
-            kind = anomaly["kind"]
-            alert_type = "Crowd Surge Detected" if kind == "surge" else "Sudden Crowd Dispersal"
-            _push_alert(
-                cam_id=cam_id,
-                kind=kind,
-                alert_type=alert_type,
-                target=cam_id,
-                detail=anomaly.get("detail", ""),
-                ts=now,
-            )
+        if anomaly.get("active"):
+            kind = anomaly.get("kind")
+            if kind in {"surge", "dispersal"}:
+                alert_type = "Crowd Surge Detected" if kind == "surge" else "Sudden Crowd Dispersal"
+                _push_alert(
+                    cam_id=cam_id,
+                    kind=kind,
+                    alert_type=alert_type,
+                    target=cam_id,
+                    detail=anomaly.get("detail", ""),
+                    ts=now,
+                )
+            elif kind == "panic":
+                _push_alert(
+                    cam_id=cam_id,
+                    kind="panic",
+                    alert_type="Panic / Running Detected",
+                    target=cam_id,
+                    detail=anomaly.get("detail", ""),
+                    ts=now,
+                )
+            elif kind == "loitering":
+                _push_alert(
+                    cam_id=cam_id,
+                    kind="loitering",
+                    alert_type="Suspicious Loitering Detected",
+                    target=cam_id,
+                    detail=anomaly.get("detail", ""),
+                    ts=now,
+                )
 
 
 def _alert_sync_loop():
@@ -513,7 +546,9 @@ def camera_features(cam_id):
         if "anomaly" in body:
             d.anomaly_enabled = bool(body["anomaly"])
             if not d.anomaly_enabled:
-                d._anomaly_state = {"active": False, "kind": None, "detail": ""}
+                d._anomaly_state = {"active": False, "kind": None, "detail": "", "panic_count": 0, "loitering_count": 0}
+                if hasattr(d, "_tracked_objects"):
+                    d._tracked_objects.clear()
     return jsonify({
         "anomaly": getattr(d, "anomaly_enabled", False),
         "anomalyState": getattr(d, "_anomaly_state", {}),

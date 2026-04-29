@@ -15,6 +15,8 @@ import numpy as np
 import cv2
 from pathlib import Path
 from ultralytics import YOLO
+from tracker import TrackedObject
+from anomaly_detector import AnomalyDetector
 
 _global_models = {}
 
@@ -330,7 +332,11 @@ class OptimisedDetector:
         # Feature flags (toggled live via /cameras/<id>/features)
         self.anomaly_enabled = False
         self._count_history  = deque(maxlen=120)   # (timestamp, person_count)
-        self._anomaly_state  = {"active": False, "kind": None, "detail": ""}
+        self._anomaly_state  = {"active": False, "kind": None, "detail": "", "panic_count": 0, "loitering_count": 0}
+
+        # Per-person behaviour tracking (PANIC / LOITERING)
+        self._tracked_objects: dict = {}   # track_id -> TrackedObject
+        self._anomaly_detector = AnomalyDetector()
 
         # For webcam / device sources, cv2 expects an int index.
         # For file paths, resolve relative paths against the project root so
@@ -432,6 +438,10 @@ class OptimisedDetector:
 
             frame = resize_frame(frame, max_dim=640)
 
+            # Read feature flags under lock so HTTP toggling can't race
+            with self._lock:
+                anomaly_on = self.anomaly_enabled
+
             annotated = frame.copy()
             total_count = 0
             person_count = 0
@@ -441,27 +451,35 @@ class OptimisedDetector:
             for idx, m in enumerate(self.models):
                 try:
                     path_str = self.model_paths[idx].lower() if hasattr(self, 'model_paths') else ""
-                    # Lower confidence threshold slightly for the COCO phone model
                     current_conf = 0.20 if "yolov8n" in path_str else self.conf
-
-                    # Select appropriate class filter
                     current_classes = self.classes
                     if self.per_model_classes and idx < len(self.per_model_classes):
                         current_classes = self.per_model_classes[idx]
-                        
-                    # ONNX export was rigidly sized, so check if model is ONNX to use correct size
                     current_imgsz = 416 if "onnx" in path_str else self.imgsz
+                    is_person_model = "phone" not in path_str and "yolov8n" not in path_str
 
-                    results = m(
-                        frame,
-                        imgsz=current_imgsz,
-                        conf=current_conf,
-                        iou=self.iou,
-                        classes=current_classes,
-                        verbose=False,
-                        half=False,        # half precision is GPU only
-                        agnostic_nms=True, # better for overlapping people in crowds
-                    )
+                    if is_person_model and anomaly_on:
+                        results = m.track(
+                            frame,
+                            persist=True,
+                            imgsz=current_imgsz,
+                            conf=current_conf,
+                            iou=self.iou,
+                            classes=current_classes,
+                            verbose=False,
+                            half=False,
+                        )
+                    else:
+                        results = m(
+                            frame,
+                            imgsz=current_imgsz,
+                            conf=current_conf,
+                            iou=self.iou,
+                            classes=current_classes,
+                            verbose=False,
+                            half=False,
+                            agnostic_nms=True,
+                        )
                     annotated = results[0].plot(img=annotated, line_width=2)
                     count = len(results[0].boxes)
                     if count:
@@ -473,6 +491,28 @@ class OptimisedDetector:
                                 phone_count += 1
                             elif label_kind == "person":
                                 person_count += 1
+
+                    # Update per-person tracked objects for behaviour anomaly detection
+                    if is_person_model and anomaly_on:
+                        if count and results[0].boxes.id is not None:
+                            track_ids = results[0].boxes.id.int().cpu().tolist()
+                            bboxes = results[0].boxes.xyxy.cpu().numpy()
+                            seen_ids = set()
+                            for i, tid in enumerate(track_ids):
+                                x1, y1, x2, y2 = bboxes[i]
+                                centroid = ((x1 + x2) / 2, (y1 + y2) / 2)
+                                bbox = (x1, y1, x2, y2)
+                                if tid in self._tracked_objects:
+                                    self._tracked_objects[tid].update(bbox, centroid)
+                                else:
+                                    self._tracked_objects[tid] = TrackedObject(tid, bbox, centroid)
+                                seen_ids.add(tid)
+                            stale = [k for k in self._tracked_objects if k not in seen_ids]
+                            for k in stale:
+                                del self._tracked_objects[k]
+                        else:
+                            self._tracked_objects.clear()
+
                     total_count += count
                 except Exception as e:
                     print(f"[detector] Error in inference loop for model {idx}: {e}")
@@ -487,15 +527,47 @@ class OptimisedDetector:
             heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
             now = time.time()
 
-            # Read feature flags under lock so HTTP toggling can't race
-            with self._lock:
-                anomaly_on = self.anomaly_enabled
+            # Per-person behaviour anomaly detection (PANIC / LOITERING)
+            panic_count = 0
+            loitering_count = 0
+            if anomaly_on and self._tracked_objects:
+                self._anomaly_detector.process(self._tracked_objects)
+                panic_count = sum(1 for o in self._tracked_objects.values() if o.anomaly_label == "PANIC")
+                loitering_count = sum(1 for o in self._tracked_objects.values() if o.anomaly_label == "LOITERING")
+                for obj in self._tracked_objects.values():
+                    if obj.is_anomalous:
+                        x1, y1, x2, y2 = map(int, obj.bbox)
+                        if obj.anomaly_label == "PANIC":
+                            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                            cv2.putText(annotated, "PANIC", (x1, max(y1 - 8, 10)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+                        elif obj.anomaly_label == "LOITERING":
+                            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                            cv2.putText(annotated, "LOITERING", (x1, max(y1 - 8, 10)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
-            # Crowd anomaly detection
-            anomaly_state = {"active": False, "kind": None, "detail": ""}
+            # Crowd count anomaly detection (surge / dispersal)
+            crowd_anomaly = {"active": False, "kind": None, "detail": ""}
             if anomaly_on:
                 self._count_history.append((now, person_count))
-                anomaly_state = _detect_crowd_anomaly(self._count_history)
+                crowd_anomaly = _detect_crowd_anomaly(self._count_history)
+
+            # Merge into unified anomaly state (behaviour takes priority over crowd count)
+            if panic_count > 0:
+                top_kind, top_detail = "panic", f"{panic_count} person(s) running/panicking"
+            elif loitering_count > 0:
+                top_kind, top_detail = "loitering", f"{loitering_count} person(s) loitering suspiciously"
+            elif crowd_anomaly["active"]:
+                top_kind, top_detail = crowd_anomaly["kind"], crowd_anomaly["detail"]
+            else:
+                top_kind, top_detail = None, ""
+            anomaly_state = {
+                "active": bool(panic_count or loitering_count or crowd_anomaly["active"]),
+                "kind": top_kind,
+                "detail": top_detail,
+                "panic_count": panic_count,
+                "loitering_count": loitering_count,
+            }
             self._anomaly_state = anomaly_state
 
             with self._lock:
@@ -595,7 +667,11 @@ class PushDetector:
         # Feature flags
         self.anomaly_enabled = False
         self._count_history  = deque(maxlen=120)
-        self._anomaly_state  = {"active": False, "kind": None, "detail": ""}
+        self._anomaly_state  = {"active": False, "kind": None, "detail": "", "panic_count": 0, "loitering_count": 0}
+
+        # Per-person behaviour tracking (PANIC / LOITERING)
+        self._tracked_objects: dict = {}
+        self._anomaly_detector = AnomalyDetector()
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -654,8 +730,12 @@ class PushDetector:
                 continue
 
             last_id = frame_id
-            
+
             frame = resize_frame(frame, max_dim=640)
+
+            # Read feature flags under lock so HTTP toggling can't race
+            with self._lock:
+                anomaly_on = self.anomaly_enabled
 
             annotated = frame.copy()
             total_count = 0
@@ -667,23 +747,34 @@ class PushDetector:
                 try:
                     path_str = self.model_paths[idx].lower() if hasattr(self, 'model_paths') else ""
                     current_conf = 0.20 if "yolov8n" in path_str else self.conf
-
                     current_classes = self.classes
                     if self.per_model_classes and idx < len(self.per_model_classes):
                         current_classes = self.per_model_classes[idx]
-                        
                     current_imgsz = 416 if "onnx" in path_str else self.imgsz
+                    is_person_model = "phone" not in path_str and "yolov8n" not in path_str
 
-                    results = m(
-                        frame,
-                        imgsz=current_imgsz,
-                        conf=current_conf,
-                        iou=self.iou,
-                        classes=current_classes,
-                        verbose=False,
-                        half=False,
-                        agnostic_nms=True,
-                    )
+                    if is_person_model and anomaly_on:
+                        results = m.track(
+                            frame,
+                            persist=True,
+                            imgsz=current_imgsz,
+                            conf=current_conf,
+                            iou=self.iou,
+                            classes=current_classes,
+                            verbose=False,
+                            half=False,
+                        )
+                    else:
+                        results = m(
+                            frame,
+                            imgsz=current_imgsz,
+                            conf=current_conf,
+                            iou=self.iou,
+                            classes=current_classes,
+                            verbose=False,
+                            half=False,
+                            agnostic_nms=True,
+                        )
                     annotated = results[0].plot(img=annotated, line_width=2)
                     count = len(results[0].boxes)
                     if count:
@@ -695,6 +786,28 @@ class PushDetector:
                                 phone_count += 1
                             elif label_kind == "person":
                                 person_count += 1
+
+                    # Update per-person tracked objects for behaviour anomaly detection
+                    if is_person_model and anomaly_on:
+                        if count and results[0].boxes.id is not None:
+                            track_ids = results[0].boxes.id.int().cpu().tolist()
+                            bboxes = results[0].boxes.xyxy.cpu().numpy()
+                            seen_ids = set()
+                            for i, tid in enumerate(track_ids):
+                                x1, y1, x2, y2 = bboxes[i]
+                                centroid = ((x1 + x2) / 2, (y1 + y2) / 2)
+                                bbox = (x1, y1, x2, y2)
+                                if tid in self._tracked_objects:
+                                    self._tracked_objects[tid].update(bbox, centroid)
+                                else:
+                                    self._tracked_objects[tid] = TrackedObject(tid, bbox, centroid)
+                                seen_ids.add(tid)
+                            stale = [k for k in self._tracked_objects if k not in seen_ids]
+                            for k in stale:
+                                del self._tracked_objects[k]
+                        else:
+                            self._tracked_objects.clear()
+
                     total_count += count
                 except Exception as e:
                     print(f"[push-detector] Error in inference loop for model {idx}: {e}")
@@ -707,15 +820,47 @@ class PushDetector:
             heatmap_frm = _apply_heatmap(frame, self._heat_accumulator, boxes)
             now = time.time()
 
-            # Read feature flags under lock so HTTP toggling can't race
-            with self._lock:
-                anomaly_on = self.anomaly_enabled
+            # Per-person behaviour anomaly detection (PANIC / LOITERING)
+            panic_count = 0
+            loitering_count = 0
+            if anomaly_on and self._tracked_objects:
+                self._anomaly_detector.process(self._tracked_objects)
+                panic_count = sum(1 for o in self._tracked_objects.values() if o.anomaly_label == "PANIC")
+                loitering_count = sum(1 for o in self._tracked_objects.values() if o.anomaly_label == "LOITERING")
+                for obj in self._tracked_objects.values():
+                    if obj.is_anomalous:
+                        x1, y1, x2, y2 = map(int, obj.bbox)
+                        if obj.anomaly_label == "PANIC":
+                            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                            cv2.putText(annotated, "PANIC", (x1, max(y1 - 8, 10)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+                        elif obj.anomaly_label == "LOITERING":
+                            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                            cv2.putText(annotated, "LOITERING", (x1, max(y1 - 8, 10)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
-            # Crowd anomaly detection
-            anomaly_state = {"active": False, "kind": None, "detail": ""}
+            # Crowd count anomaly detection (surge / dispersal)
+            crowd_anomaly = {"active": False, "kind": None, "detail": ""}
             if anomaly_on:
                 self._count_history.append((now, person_count))
-                anomaly_state = _detect_crowd_anomaly(self._count_history)
+                crowd_anomaly = _detect_crowd_anomaly(self._count_history)
+
+            # Merge into unified anomaly state (behaviour takes priority over crowd count)
+            if panic_count > 0:
+                top_kind, top_detail = "panic", f"{panic_count} person(s) running/panicking"
+            elif loitering_count > 0:
+                top_kind, top_detail = "loitering", f"{loitering_count} person(s) loitering suspiciously"
+            elif crowd_anomaly["active"]:
+                top_kind, top_detail = crowd_anomaly["kind"], crowd_anomaly["detail"]
+            else:
+                top_kind, top_detail = None, ""
+            anomaly_state = {
+                "active": bool(panic_count or loitering_count or crowd_anomaly["active"]),
+                "kind": top_kind,
+                "detail": top_detail,
+                "panic_count": panic_count,
+                "loitering_count": loitering_count,
+            }
             self._anomaly_state = anomaly_state
 
             with self._lock:
